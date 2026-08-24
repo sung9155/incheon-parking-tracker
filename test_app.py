@@ -312,6 +312,32 @@ def test_collect_failure_never_logs_the_service_key(caplog):
     assert "403" in caplog.text
 
 
+def test_collect_failure_never_raises_or_leaks_key_on_awkward_exceptions(caplog):
+    # _log_collect_failure는 collect_loop의 except 안에서 호출된다 — 여기서 예외가 새어
+    # 나가면 수집기 태스크가 영구히 죽는다. httpx.DecodingError는 httpx.HTTPError의
+    # 서브클래스이면서도 .request가 안 붙은 채로 만들어질 수 있고(재현: 손상된 gzip 응답),
+    # httpx.InvalidURL은 아예 httpx.HTTPError가 아니다 — 두 경우 다 예외를 던지지 않고,
+    # 어떤 텍스트로도 가짜 키를 새 나가게 하지 않아야 한다.
+    import logging
+
+    import httpx
+
+    assert not issubclass(httpx.InvalidURL, httpx.HTTPError)
+
+    awkward = (
+        httpx.DecodingError("bad gzip data"),  # HTTPError 서브클래스지만 request 없음
+        httpx.InvalidURL("bad url FAKEKEY_DO_NOT_LOG_2"),  # HTTPError조차 아님
+        ValueError("boom FAKEKEY_DO_NOT_LOG_3"),  # httpx와 무관한 예외
+    )
+
+    for exc in awkward:
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger="parking"):
+            app._log_collect_failure(exc)  # 던지면 이 자체로 테스트 실패
+
+        assert "FAKEKEY_DO_NOT_LOG" not in caplog.text
+
+
 def test_lifespan_cancels_collector_task_cleanly_on_shutdown(monkeypatch):
     import time
 

@@ -111,20 +111,29 @@ async def collect_once(client: httpx.AsyncClient, con, key: str) -> int:
 
 
 def _log_collect_failure(exc: Exception) -> None:
-    # httpx 예외의 str()/repr()에는 요청 URL이 그대로 들어있고, 그 URL의 쿼리스트링에는
-    # serviceKey가 평문으로 담겨 있다 (예: "...url 'https://.../x?serviceKey=...&type=json'").
-    # httpx.HTTPError(HTTPStatusError, RequestError 등 전송/상태 오류 전부의 공통 상위 클래스)는
-    # 항상 .request를 들고 있으므로, 그 경로만 쿼리를 뗀 URL + 상태 코드로 안전하게 로깅하고
-    # log.exception()은 쓰지 않는다 — traceback의 문자열 표현에도 같은 URL이 들어가기 때문이다.
-    if isinstance(exc, httpx.HTTPError):
-        url = exc.request.url.copy_with(query=None)
+    # 이 함수는 절대 예외를 던지면 안 된다 — collect_loop의 except 안에서 호출되므로,
+    # 여기서 터지면 그 예외가 루프 밖으로 새어나가 수집기 태스크가 영구히 죽는다.
+    # (예: httpx.DecodingError는 httpx.HTTPError의 서브클래스이지만 .request가 안 붙은 채로
+    # 만들어질 수 있어, exc.request에 그냥 접근하면 RuntimeError가 난다.)
+    #
+    # 또한 어떤 필드도 무심코 요청 URL의 쿼리스트링(=serviceKey)을 로그에 흘리면 안 된다.
+    # str(exc)/log.exception()의 트레이스백에는 그 URL이 그대로 들어갈 수 있으므로 절대
+    # 원본 예외 메시지를 로깅하지 않는다. "이 예외 타입은 안전하다"를 나열하는 대신,
+    # 상태 코드/쿼리 없는 URL/타입명만 뽑아내는 이 경로 자체를 무엇을 받아도 안전하게 만든다
+    # — 그래야 나중에 새로운 예외 타입이 나타나도 이 보장이 깨지지 않는다.
+    status = url = None
+    try:
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        if status is not None:
-            log.error("collect failed: HTTP %s for %s", status, url)
-        else:
-            log.error("collect failed: %s for %s", type(exc).__name__, url)
+        url = exc.request.url.copy_with(query=None)
+    except Exception:
+        pass
+
+    if status is not None and url is not None:
+        log.error("collect failed: HTTP %s for %s", status, url)
+    elif url is not None:
+        log.error("collect failed: %s for %s", type(exc).__name__, url)
     else:
-        log.exception("collect failed")
+        log.error("collect failed: %s", type(exc).__name__)
 
 
 async def collect_loop(con) -> None:
