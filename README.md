@@ -31,12 +31,23 @@ docker compose up -d --build
 ## 개발
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (25개 테스트)
 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 ```
 
 `COLLECT=0`이면 수집 루프가 뜨지 않는다.
+
+## 운영
+
+컨테이너의 요일×시간 패턴은 SQLite의 `strftime(..., 'localtime')`을 거쳐 정산되므로, 시간대가
+정확해야 한다. 설정 후 다음을 실행해서 `1970-01-01 09:00:00` (KST)가 나오는지 확인하라.
+
+```bash
+docker compose exec parking python -c "import sqlite3; print(sqlite3.connect(':memory:').execute(\"SELECT datetime(0,'unixepoch','localtime')\").fetchone()[0])"
+```
+
+`00:00:00`이 나오면 `tzdata` 패키지가 없어서 UTC로 고정되었다. 이 경우 요일×시간 패턴이 9시간 밀린다.
 
 ## 문서
 
