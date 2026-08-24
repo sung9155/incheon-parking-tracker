@@ -1,0 +1,10 @@
+services:
+  parking:
+    build: .
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    volumes: ["./data:/data"]
+    environment:
+      TZ: Asia/Seoul
+      SERVICE_KEY: ${SERVICE_KEY}
+      DB_PATH: /data/parking.db
