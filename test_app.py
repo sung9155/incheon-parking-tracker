@@ -86,3 +86,51 @@ def test_latest_returns_only_most_recent_snapshot(tmp_path):
 def test_latest_on_empty_db_returns_empty(tmp_path):
     con = db.connect(tmp_path / "t.db")
     assert db.latest(con) == []
+
+
+HOUR = 3600
+DAY = 86400
+
+
+def test_series_returns_raw_points_for_short_range(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [
+        (0, "A", 10, 100),
+        (300, "A", 20, 100),
+        (600, "A", 30, 100),
+    ])
+
+    rows = db.series(con, 0, 2 * DAY)
+
+    assert [(r["ts"], r["available"]) for r in rows] == [(0, 90), (300, 80), (600, 70)]
+
+
+def test_series_buckets_by_hour_for_long_range(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [
+        (0, "A", 10, 100),           # 0시 버킷, available 90
+        (300, "A", 30, 100),         # 0시 버킷, available 70
+        (HOUR + 60, "A", 50, 100),   # 1시 버킷, available 50
+    ])
+
+    rows = db.series(con, 0, 10 * DAY)
+
+    assert [(r["ts"], r["available"]) for r in rows] == [(0, 80.0), (HOUR, 50.0)]
+
+
+def test_series_respects_range_bounds(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(0, "A", 1, 100), (500, "A", 2, 100), (1000, "A", 3, 100)])
+
+    rows = db.series(con, 400, 600)
+
+    assert [r["ts"] for r in rows] == [500]
+
+
+def test_series_separates_floors(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(0, "A", 10, 100), (0, "B", 20, 100)])
+
+    rows = db.series(con, 0, DAY)
+
+    assert sorted((r["floor"], r["available"]) for r in rows) == [("A", 90), ("B", 80)]

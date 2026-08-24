@@ -42,3 +42,30 @@ def latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
         WHERE ts = (SELECT MAX(ts) FROM parking)
         """
     ).fetchall()
+
+
+BUCKET_THRESHOLD_SECONDS = 3 * 86400
+BUCKET_SECONDS = 3600
+
+_SERIES_RAW = """
+SELECT ts, floor, capacity - parked AS available
+FROM parking
+WHERE ts BETWEEN ? AND ?
+ORDER BY ts, floor
+"""
+
+_SERIES_BUCKETED = """
+SELECT (ts / ?) * ? AS ts, floor, AVG(capacity - parked) AS available
+FROM parking
+WHERE ts BETWEEN ? AND ?
+GROUP BY 1, floor
+ORDER BY 1, floor
+"""
+
+
+def series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
+    if end - start > BUCKET_THRESHOLD_SECONDS:
+        return con.execute(
+            _SERIES_BUCKETED, (BUCKET_SECONDS, BUCKET_SECONDS, start, end)
+        ).fetchall()
+    return con.execute(_SERIES_RAW, (start, end)).fetchall()
