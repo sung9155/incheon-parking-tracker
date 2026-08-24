@@ -93,6 +93,40 @@ def test_latest_on_empty_db_returns_empty(tmp_path):
     assert db.latest(con) == []
 
 
+def test_latest_returns_bare_columns_from_the_max_ts_row(tmp_path):
+    # SQLite의 bare-column-follows-MAX(ts) 보장을 신뢰만 하지 말고 증명한다: 같은 층에
+    # ts가 다른 두 행을 넣고, parked가 최신 ts의 것인지 확인한다.
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [
+        (1000, "A", 10, 100),
+        (2000, "A", 99, 100),
+    ])
+
+    rows = db.latest(con)
+
+    assert len(rows) == 1
+    assert rows[0]["ts"] == 2000
+    assert rows[0]["parked"] == 99
+
+
+def test_latest_and_series_survive_per_floor_datetm_drift(tmp_path):
+    # 실제 API는 한 번의 폴에서도 층마다 datetm이 몇 초씩 어긋난다 (live-sample.json 재현:
+    # 한 폴에 datetm 14종, 23초 폭). 세 층 모두 같은 ts를 공유한다고 가정하지 않는다.
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [
+        (1000, "A", 10, 100),
+        (1005, "B", 20, 100),
+        (1012, "C", 30, 100),
+    ])
+
+    latest_rows = db.latest(con)
+    assert sorted(r["floor"] for r in latest_rows) == ["A", "B", "C"]
+
+    series_rows = db.series(con, 900, 1100)
+    assert {r["ts"] for r in series_rows} == {900}
+    assert sorted(r["floor"] for r in series_rows) == ["A", "B", "C"]
+
+
 HOUR = 3600
 DAY = 86400
 
@@ -129,7 +163,9 @@ def test_series_respects_range_bounds(tmp_path):
 
     rows = db.series(con, 400, 600)
 
-    assert [r["ts"] for r in rows] == [500]
+    # 300초 버킷: 500 -> (500 // 300) * 300 == 300. 범위 필터링(0, 1000 제외)이지
+    # 정렬/버킷 위치는 그대로 검증한다.
+    assert [r["ts"] for r in rows] == [300]
 
 
 def test_series_separates_floors(tmp_path):
@@ -251,4 +287,7 @@ def test_series_endpoint_windows_from_now(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         rows = client.get("/api/series?days=1").json()
 
-    assert [r["ts"] for r in rows] == [now - 600]
+    # days=1은 짧은 범위라 300초 버킷을 탄다 — (now - 600)을 그대로가 아니라
+    # 버킷 경계로 반올림한 값과 비교한다.
+    bucket = db.SHORT_BUCKET_SECONDS
+    assert [r["ts"] for r in rows] == [((now - 600) // bucket) * bucket]
