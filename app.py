@@ -1,5 +1,16 @@
+import asyncio
 import logging
+import os
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import unquote
+
+import httpx
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+import db
 
 log = logging.getLogger("parking")
 
@@ -68,6 +79,7 @@ FLOOR_GROUPS: dict[str, tuple[str, str]] = {
     "T2 예약 주차장": ("T2", "예약"),
 }
 
+# ponytail: unbounded set, but the API returns a fixed 19 labels — bound it if that ever changes
 _warned_floors: set[str] = set()
 
 
@@ -79,3 +91,77 @@ def group_of(floor: str) -> tuple[str, str]:
             log.warning("unmapped floor %r — grouped as 기타", floor)
         return ("기타", "기타")
     return group
+
+
+COLLECT_INTERVAL_SECONDS = 300
+
+
+async def collect_once(client: httpx.AsyncClient, con, key: str) -> int:
+    r = await client.get(
+        API_URL,
+        params={"serviceKey": key, "numOfRows": 100, "pageNo": 1, "type": "json"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    rows = parse_rows(r.json())
+    for _, floor, _, _ in rows:
+        group_of(floor)          # 미매핑 구역 경고를 남긴다
+    db.insert_rows(con, rows)
+    return len(rows)
+
+
+async def collect_loop(con) -> None:
+    # .env에는 Encoding 키 또는 Decoding 키가 들어올 수 있다. httpx params=는 값을 다시
+    # URL 인코딩하므로, Encoding 키를 그대로 넘기면 이중 인코딩되어 403이 난다. unquote는
+    # Decoding 키(base64, %가 없음)에는 no-op이고, Encoding 키는 되돌려 올바르게 인코딩되게 한다.
+    key = unquote(os.environ["SERVICE_KEY"])
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                n = await collect_once(client, con, key)
+                log.info("collected %d rows", n)
+            except Exception:
+                # 재시도하지 않는다. 5분 뒤 다음 틱이 온다.
+                log.exception("collect failed")
+            await asyncio.sleep(COLLECT_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    con = db.connect()
+    _app.state.con = con
+    task = None
+    if os.environ.get("COLLECT", "1") == "1":
+        task = asyncio.create_task(collect_loop(con))
+    yield
+    if task is not None:
+        task.cancel()
+    con.close()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def _with_group(row) -> dict:
+    d = dict(row)
+    d["terminal"], d["kind"] = group_of(d["floor"])
+    return d
+
+
+@app.get("/api/current")
+def api_current():
+    return [_with_group(r) for r in db.latest(app.state.con)]
+
+
+@app.get("/api/series")
+def api_series(days: int = 1):
+    end = int(time.time())
+    return [_with_group(r) for r in db.series(app.state.con, end - days * 86400, end)]
+
+
+@app.get("/api/pattern")
+def api_pattern():
+    return [_with_group(r) for r in db.pattern(app.state.con)]
+
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

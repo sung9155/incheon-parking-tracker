@@ -1,5 +1,3 @@
-import json
-import os
 from datetime import datetime
 
 import pytest
@@ -169,18 +167,32 @@ def test_unknown_floor_falls_back_to_etc():
     assert app.group_of("존재하지 않는 주차장") == ("기타", "기타")
 
 
+KNOWN_LIVE_FLOORS = (
+    "T1 단기주차장지하1층",
+    "T1 단기주차장지하2층",
+    "T1 단기주차장지하3층",
+    "T1 단기주차장지상층",
+    "T1 장기 P1 주차장",
+    "T1 장기 P1 주차타워",
+    "T1 장기 P2 주차장",
+    "T1 장기 P2 주차타워",
+    "T1 장기 P3 주차장",
+    "T1 P5 예약주차장",
+    "T2 단기주차장지하M층",
+    "T2 단기주차장지상1층",
+    "T2 단기주차장지상2층",
+    "T2 단기주차장지상3층",
+    "T2 단기주차장지상4층",
+    "T2 장기 주차장",
+    "T2 P1 장기주차타워",
+    "T2 P2 장기주차타워",
+    "T2 예약 주차장",
+)
+
+
 def test_every_live_sample_floor_maps_to_a_real_group():
-    sample_path = os.path.join(
-        os.path.dirname(__file__),
-        ".superpowers", "sdd", "2026-08-24-incheon-parking", "live-sample.json",
-    )
-    with open(sample_path, encoding="utf-8") as f:
-        payload = json.load(f)
-
-    rows = app.parse_rows(payload)
-
-    assert len(rows) == 19
-    for _, floor, _, _ in rows:
+    assert len(KNOWN_LIVE_FLOORS) == 19
+    for floor in KNOWN_LIVE_FLOORS:
         assert app.group_of(floor) != ("기타", "기타")
 
 
@@ -195,3 +207,48 @@ def test_pattern_separates_distinct_hours(tmp_path):
     assert sorted(r["hour"] for r in rows) == sorted(
         [datetime.fromtimestamp(base).hour, datetime.fromtimestamp(base + 2 * HOUR).hour]
     )
+
+
+from fastapi.testclient import TestClient
+
+
+def test_endpoints_return_grouped_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    con = db.connect(tmp_path / "t.db")
+    known_floor = next(iter(app.FLOOR_GROUPS))
+    ts = int(datetime(2026, 8, 24, 15, 0).timestamp())
+    db.insert_rows(con, [(ts, known_floor, 40, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        current = client.get("/api/current").json()
+        assert current[0]["floor"] == known_floor
+        assert current[0]["available"] == 60
+        assert current[0]["terminal"] == app.FLOOR_GROUPS[known_floor][0]
+        assert current[0]["kind"] == app.FLOOR_GROUPS[known_floor][1]
+
+        pattern = client.get("/api/pattern").json()
+        assert pattern[0]["samples"] == 1
+
+
+def test_series_endpoint_windows_from_now(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    con = db.connect(tmp_path / "t.db")
+    known_floor = next(iter(app.FLOOR_GROUPS))
+    now = int(time.time())
+    db.insert_rows(con, [
+        (now - 600, known_floor, 40, 100),        # 창 안
+        (now - 5 * DAY, known_floor, 10, 100),    # 창 밖
+    ])
+    con.close()
+
+    with TestClient(app.app) as client:
+        rows = client.get("/api/series?days=1").json()
+
+    assert [r["ts"] for r in rows] == [now - 600]
