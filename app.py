@@ -44,7 +44,11 @@ def parse_rows(payload: dict) -> list[tuple[int, str, int, int]]:
     items = payload["response"]["body"]["items"]
     if isinstance(items, dict):
         items = items.get("item", [])
-    return [
+    # 한 응답 안에서도 구역별 datetm이 최대 23초까지 어긋난다 (측정치, 신호 아님).
+    # 이를 각 행에 그대로 쓰면 300초 버킷 경계 근처에서 한 폴이 두 버킷으로 쪼개져,
+    # 프론트가 부분 합계를 그래프에 그린다. 응답 전체를 그 응답의 최대 datetm 하나로
+    # 뭉갠다 — 응답이 그대로면 max도 그대로라 INSERT OR IGNORE 중복 제거는 그대로 유지된다.
+    parsed = [
         (
             parse_datetm(it["datetm"]),
             it["floor"].strip(),
@@ -53,6 +57,10 @@ def parse_rows(payload: dict) -> list[tuple[int, str, int, int]]:
         )
         for it in items
     ]
+    if not parsed:
+        return []
+    ts = max(row[0] for row in parsed)
+    return [(ts, floor, parked, capacity) for _, floor, parked, capacity in parsed]
 
 
 # scripts/probe.py 출력(실제 API 호출, 2026-08-24)으로 확정한 floor 원문 → (터미널, 유형).

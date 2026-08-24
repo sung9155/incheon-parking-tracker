@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 
 import pytest
@@ -73,18 +74,36 @@ def test_parse_rows_handles_item_wrapper():
     assert rows[0][2:] == (10, 20)
 
 
+def test_parse_rows_collapses_one_response_to_a_single_timestamp():
+    # 실제 API는 한 응답 안에서도 구역마다 datetm이 몇 초씩 어긋난다. 이를 그대로 쓰면
+    # 300초 버킷 경계 근처에서 한 폴이 두 버킷으로 쪼개져 프론트가 부분 합계를 그린다.
+    # 응답 전체가 그 응답의 최대 datetm 하나를 공유해야 한다.
+    payload = {"response": {"body": {"items": [
+        {"floor": "A", "parking": "1", "parkingarea": "10", "datetm": "2026-08-24 13:05:00"},
+        {"floor": "B", "parking": "2", "parkingarea": "10", "datetm": "2026-08-24 13:05:07"},
+        {"floor": "C", "parking": "3", "parkingarea": "10", "datetm": "2026-08-24 13:05:23"},
+    ]}}}
+
+    rows = app.parse_rows(payload)
+
+    expected_ts = int(datetime(2026, 8, 24, 13, 5, 23).timestamp())
+    assert {ts for ts, *_ in rows} == {expected_ts}
+    assert sorted(floor for _, floor, _, _ in rows) == ["A", "B", "C"]
+
+
 def test_latest_returns_only_most_recent_snapshot(tmp_path):
     con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
     db.insert_rows(con, [
-        (1000, "A", 10, 100),
-        (1000, "B", 20, 200),
-        (1300, "A", 30, 100),
-        (1300, "B", 40, 200),
+        (now - 300, "A", 10, 100),
+        (now - 300, "B", 20, 200),
+        (now, "A", 30, 100),
+        (now, "B", 40, 200),
     ])
 
     rows = db.latest(con)
 
-    assert {r["ts"] for r in rows} == {1300}
+    assert {r["ts"] for r in rows} == {now}
     assert sorted((r["floor"], r["available"]) for r in rows) == [("A", 70), ("B", 160)]
 
 
@@ -97,41 +116,67 @@ def test_latest_returns_bare_columns_from_the_max_ts_row(tmp_path):
     # SQLite의 bare-column-follows-MAX(ts) 보장을 신뢰만 하지 말고 증명한다: 같은 층에
     # ts가 다른 두 행을 넣고, parked가 최신 ts의 것인지 확인한다.
     con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
     db.insert_rows(con, [
-        (1000, "A", 10, 100),
-        (2000, "A", 99, 100),
+        (now - 1000, "A", 10, 100),
+        (now, "A", 99, 100),
     ])
 
     rows = db.latest(con)
 
     assert len(rows) == 1
-    assert rows[0]["ts"] == 2000
+    assert rows[0]["ts"] == now
     assert rows[0]["parked"] == 99
 
 
 def test_latest_and_series_survive_per_floor_datetm_drift(tmp_path):
-    # 실제 API는 한 번의 폴에서도 층마다 datetm이 몇 초씩 어긋난다 (live-sample.json 재현:
-    # 한 폴에 datetm 14종, 23초 폭). 세 층 모두 같은 ts를 공유한다고 가정하지 않는다.
+    # db.insert_rows 자체는 여전히 층별로 다른 ts를 받아들일 수 있어야 한다 (app.parse_rows가
+    # 이제 응답 하나를 하나의 ts로 뭉개지만, db 계층은 그 가정에 기대지 않는다). 세 층 모두
+    # 같은 ts를 공유한다고 가정하지 않는다.
     con = db.connect(tmp_path / "t.db")
+    base = (int(time.time()) // 300) * 300  # 버킷 경계에 정렬해 series 버킷을 예측 가능하게
     db.insert_rows(con, [
-        (1000, "A", 10, 100),
-        (1005, "B", 20, 100),
-        (1012, "C", 30, 100),
+        (base, "A", 10, 100),
+        (base + 5, "B", 20, 100),
+        (base + 12, "C", 30, 100),
     ])
 
     latest_rows = db.latest(con)
     assert sorted(r["floor"] for r in latest_rows) == ["A", "B", "C"]
 
-    series_rows = db.series(con, 900, 1100)
-    assert {r["ts"] for r in series_rows} == {900}
+    series_rows = db.series(con, base - 100, base + 100)
+    assert {r["ts"] for r in series_rows} == {base}
     assert sorted(r["floor"] for r in series_rows) == ["A", "B", "C"]
+
+
+def test_latest_excludes_a_floor_stale_beyond_the_freshness_window(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    db.insert_rows(con, [
+        (now - db.LATEST_MAX_AGE_SECONDS - 1, "STALE", 10, 100),
+        (now, "FRESH", 20, 100),
+    ])
+
+    rows = db.latest(con)
+
+    assert [r["floor"] for r in rows] == ["FRESH"]
+
+
+def test_latest_includes_a_floor_within_the_freshness_window(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    db.insert_rows(con, [(now - db.LATEST_MAX_AGE_SECONDS + 1, "A", 10, 100)])
+
+    rows = db.latest(con)
+
+    assert [r["floor"] for r in rows] == ["A"]
 
 
 HOUR = 3600
 DAY = 86400
 
 
-def test_series_returns_raw_points_for_short_range(tmp_path):
+def test_series_buckets_by_5_minutes_for_short_range(tmp_path):
     con = db.connect(tmp_path / "t.db")
     db.insert_rows(con, [
         (0, "A", 10, 100),
@@ -254,7 +299,7 @@ def test_endpoints_return_grouped_rows(tmp_path, monkeypatch):
 
     con = db.connect(tmp_path / "t.db")
     known_floor = next(iter(app.FLOOR_GROUPS))
-    ts = int(datetime(2026, 8, 24, 15, 0).timestamp())
+    ts = int(time.time())  # db.latest() only reports floors seen within the last hour
     db.insert_rows(con, [(ts, known_floor, 40, 100)])
     con.close()
 
