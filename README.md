@@ -71,7 +71,7 @@ Portainer는 이를 자기 내부 클론 디렉터리(`/data/compose/<id>/data`)
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (30개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (40개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
