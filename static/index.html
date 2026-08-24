@@ -94,27 +94,6 @@
   #holiday-jump button { font-size: .85rem; padding: .25rem .6rem; }
   #empty-note { color: var(--text-secondary); font-size: .9rem; margin: .6rem 0 0; }
 
-  #detail { margin: 2rem 0 3rem; }
-  #detail h2 { font-size: 1rem; margin: 0 0 .25rem; }
-  #detail-hint { color: var(--text-secondary); font-size: .85rem; margin: 0 0 .6rem; }
-  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: .5rem; }
-  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-  th, td { padding: .5rem .75rem; text-align: right; white-space: nowrap; }
-  th:first-child, td:first-child { text-align: left; }
-  thead th { background: var(--surface); color: var(--text-secondary); font-weight: 600;
-    border-bottom: 1px solid var(--border); position: sticky; top: 0; cursor: pointer;
-    user-select: none; }
-  thead th:hover { color: var(--text-primary); }
-  thead th[aria-sort] { color: var(--text-primary); }
-  thead th[aria-sort]::after { content: ' ▾'; font-size: .75em; }
-  thead th[aria-sort="ascending"]::after { content: ' ▴'; }
-  tbody tr + tr td { border-top: 1px solid var(--border); }
-  tbody tr { cursor: pointer; }
-  tbody tr:hover td { background: color-mix(in srgb, var(--series-1) 8%, transparent); }
-  tbody tr[aria-selected="true"] td { background: color-mix(in srgb, var(--series-1) 16%, transparent); }
-  tbody tr[aria-selected="true"] td:first-child { font-weight: 700; }
-  #focus-note { color: var(--text-secondary); font-size: .85rem; margin: .5rem 0 0; }
-
   #layout { margin: 2rem 0 0; }
   #layout h2 { font-size: 1rem; margin: 0 0 .25rem; }
   .caveat { color: var(--text-secondary); font-size: .85rem; margin: 0 0 1rem; }
@@ -128,11 +107,26 @@
   .zone > h4::before { content: ''; width: .5rem; height: .5rem; border-radius: 50%;
     background: var(--muted); }
   .zone.walk > h4::before { background: var(--series-1); }
-  .site { border: 1px solid var(--border); border-radius: .375rem; padding: .5rem .6rem;
-    margin-bottom: .5rem; }
-  .site:last-child { margin-bottom: 0; }
+  .terminal-top { border: 1px solid var(--border); border-radius: .375rem; padding: .5rem;
+    text-align: center; font-size: .85rem; font-weight: 600;
+    background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
+  .away { color: var(--text-secondary); font-size: .75rem; text-align: center; margin: .3rem 0; }
+  .axis { display: flex; justify-content: space-between; color: var(--text-secondary);
+    font-size: .72rem; font-weight: 600; margin-bottom: .35rem; }
+  .band { margin-bottom: .6rem; }
+  .band:last-child { margin-bottom: 0; }
+  .band-label { font-size: .72rem; color: var(--text-secondary); margin-bottom: .25rem;
+    display: flex; align-items: center; gap: .35rem; }
+  .band-label::before { content: ''; width: .45rem; height: .45rem; border-radius: 50%;
+    background: var(--muted); flex: none; }
+  .band.walk .band-label::before { background: var(--series-1); }
+  .band-cells { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+  .site { border: 1px solid var(--border); border-radius: .375rem; padding: .5rem .6rem; }
+  .site.wide { grid-column: 1 / -1; }
+  .site.staff { opacity: .55; border-style: dashed; }
+  .site-note { font-size: .72rem; color: var(--text-secondary); margin-top: .1rem; }
   .site-head { display: flex; justify-content: space-between; align-items: baseline;
-    gap: .5rem; font-size: .88rem; font-weight: 600; }
+    gap: .5rem; font-size: .85rem; font-weight: 600; }
   .site-head .num { font-weight: 400; color: var(--text-secondary); }
   .lot { display: flex; align-items: center; gap: .5rem; width: 100%; margin-top: .4rem;
     padding: .3rem .4rem; border: 0; border-radius: .25rem; background: transparent;
@@ -144,9 +138,6 @@
   .lot .gauge { width: 3.5rem; margin: 0; flex: none; }
   .lot .num { min-width: 2.4rem; text-align: right; color: var(--text-secondary); }
   #layout-note { color: var(--text-secondary); font-size: .85rem; margin: 1rem 0 0; }
-  .pct-cell { display: inline-flex; align-items: center; gap: .55rem; }
-  .pct-cell .num { min-width: 2.6rem; text-align: right; }
-  td .gauge { width: 4.5rem; margin: 0; }
   .num { font-variant-numeric: tabular-nums; }
 </style>
 
@@ -197,32 +188,13 @@
 
 <section id="layout">
   <h2>주차장 배치</h2>
-  <p class="caveat">방위와 거리는 나타내지 않는 <strong>구조도</strong>입니다. 터미널 소속과
-    도보·셔틀 여부, 같은 부지에 평면 주차장과 주차타워가 함께 있는 관계만 표시합니다.</p>
+  <p class="caveat">공식 안내도의 배치를 따릅니다. 각 터미널 건물이 맨 위에 있고, 아래로
+    내려갈수록 터미널에서 멀어집니다. 거리는 실제 축척이 아닙니다.</p>
   <div class="terminals" id="terminals"></div>
-  <p id="layout-note">공개 데이터에 P3 다음이 P5인 것은 <strong>P4가 상주직원 전용</strong>이라
-    집계에서 빠지기 때문입니다. 또한 T1의 P1·P2와 T2의 P1·P2는 <strong>서로 완전히 다른
+  <p id="layout-note">구역을 누르면 그 주차장의 추세만 차트에 강조됩니다.<br>
+    공개 데이터에 P3 다음이 P5인 것은 <strong>P4가 상주직원 전용</strong>이라 집계에서 빠지기
+    때문입니다. 또한 T1의 P1·P2와 T2의 주차타워 P1·P2는 <strong>서로 완전히 다른
     부지</strong>입니다 — 내비게이션에 번호만 넣으면 엉뚱한 터미널로 갑니다.</p>
-</section>
-
-<section id="detail">
-  <h2>구역별 상세</h2>
-  <p id="detail-hint">행을 누르면 그 주차장의 추세만 차트에 강조됩니다.</p>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th data-sort="floor" scope="col">구역</th>
-          <th data-sort="terminal" scope="col">터미널</th>
-          <th data-sort="kind" scope="col">유형</th>
-          <th data-sort="available" scope="col">남은 자리</th>
-          <th data-sort="capacity" scope="col">전체</th>
-          <th data-sort="used" scope="col">사용률</th>
-        </tr>
-      </thead>
-      <tbody id="detail-rows"></tbody>
-    </table>
-  </div>
 </section>
 
 <script>
@@ -455,7 +427,6 @@ async function loadCurrent() {
   [...new Set(all.map(r => r.floor))].sort().forEach(floorSlot);
 
   detailRows = all;
-  renderDetail();
   renderLayout();
 
   const rows = all.filter(passesFilter);
@@ -506,60 +477,94 @@ function applyFocus() {
 // 걸어갈 수 있는지 셔틀을 타야 하는지, 같은 부지에 평면과 타워가 함께 있는지.
 // T1 P1/P2가 동편인지 서편인지는 출처마다 달라 확인되지 않았으므로 주장하지 않는다.
 const LAYOUT = [
-  ['제1여객터미널 (T1)', [
-    ['walk', '도보 — 터미널 직결', [
-      ['단기주차장', ['T1 단기주차장지하1층', 'T1 단기주차장지하2층',
-                     'T1 단기주차장지하3층', 'T1 단기주차장지상층']],
-    ]],
-    ['shuttle', '셔틀 필요 — 장기·예약', [
-      ['P1 (평면 + 타워)', ['T1 장기 P1 주차장', 'T1 장기 P1 주차타워']],
-      ['P2 (평면 + 타워)', ['T1 장기 P2 주차장', 'T1 장기 P2 주차타워']],
-      ['P3 (평면만)', ['T1 장기 P3 주차장']],
-      ['P5 예약 전용', ['T1 P5 예약주차장']],
-    ]],
-  ]],
-  ['제2여객터미널 (T2)', [
-    ['walk', '도보 — 터미널 직결', [
-      ['단기주차장', ['T2 단기주차장지하M층', 'T2 단기주차장지상1층', 'T2 단기주차장지상2층',
-                     'T2 단기주차장지상3층', 'T2 단기주차장지상4층']],
-    ]],
-    ['shuttle', '셔틀 필요 — 장기·예약', [
-      ['장기주차장 (평면)', ['T2 장기 주차장']],
-      ['P1 장기주차타워', ['T2 P1 장기주차타워']],
-      ['P2 장기주차타워', ['T2 P2 장기주차타워']],
-      ['예약 전용', ['T2 예약 주차장']],
-    ]],
-  ]],
+  {
+    title: '제1여객터미널 (T1)',
+    // 공식 안내도 기준. 터미널이 북쪽, 아래로 갈수록 남쪽. 좌=서(W), 우=동(E).
+    // P1이 동편, P2가 서편이다 — 자료마다 엇갈리던 부분이라 안내도로 확정했다.
+    away: '남쪽으로 멀어짐',
+    axis: ['서 W', '동 E'],
+    bands: [
+      { access: 'walk', label: '터미널 직결 · 도보',
+        cells: [{ site: '단기주차장', note: 'A·C·D·H 구역, 교통센터 옆', wide: true,
+          floors: ['T1 단기주차장지하1층', 'T1 단기주차장지하2층',
+                   'T1 단기주차장지하3층', 'T1 단기주차장지상층'] }] },
+      { access: 'shuttle', label: '셔틀 · 장기',
+        cells: [
+          { site: 'P2 장기주차장', note: '평면 + 주차타워',
+            floors: ['T1 장기 P2 주차장', 'T1 장기 P2 주차타워'] },
+          { site: 'P1 장기주차장', note: '평면 + 주차타워',
+            floors: ['T1 장기 P1 주차장', 'T1 장기 P1 주차타워'] },
+        ] },
+      { access: 'shuttle', label: '셔틀 · 장기',
+        cells: [
+          { site: 'P4 상주직원 주차장', note: '직원 전용 — 공개 데이터 없음', staff: true, floors: [] },
+          { site: 'P3 장기주차장', note: '평면만 · 카드 전용', floors: ['T1 장기 P3 주차장'] },
+        ] },
+      { access: 'shuttle', label: '셔틀 · 예약',
+        cells: [{ site: 'P5 예약주차장', note: '가장 남쪽, 예약 전용', wide: true,
+          floors: ['T1 P5 예약주차장'] }] },
+    ],
+  },
+  {
+    title: '제2여객터미널 (T2)',
+    // 공식 안내도 기준. 터미널이 남쪽, 아래로 갈수록 북쪽.
+    away: '북쪽으로 멀어짐',
+    axis: null,
+    bands: [
+      { access: 'walk', label: '터미널 직결 · 도보',
+        cells: [{ site: '단기주차장', note: '터미널에 바로 붙어 있음', wide: true,
+          floors: ['T2 단기주차장지하M층', 'T2 단기주차장지상1층', 'T2 단기주차장지상2층',
+                   'T2 단기주차장지상3층', 'T2 단기주차장지상4층'] }] },
+      { access: 'shuttle', label: '셔틀 · 장기 (도로 건너 북쪽)',
+        cells: [{ site: '장기주차장 (평면)', note: '셔틀 1·2·5번 승차장', wide: true,
+          floors: ['T2 장기 주차장'] }] },
+      { access: 'shuttle', label: '셔틀 · 장기',
+        cells: [{ site: '주차타워 P1 · P2', note: '장기주차장 북쪽 끝, 셔틀 3·4번 승차장', wide: true,
+          floors: ['T2 P1 장기주차타워', 'T2 P2 장기주차타워'] }] },
+      { access: 'shuttle', label: '셔틀 · 예약',
+        cells: [{ site: '예약 주차장', note: '가장 북쪽, 별도 부지', wide: true,
+          floors: ['T2 예약 주차장'] }] },
+    ],
+  },
 ];
 
 function renderLayout() {
   const by = new Map(detailRows.map(r => [r.floor, r]));
   const pct = r => r && r.capacity ? Math.round((r.capacity - r.available) / r.capacity * 100) : null;
 
-  document.getElementById('terminals').innerHTML = LAYOUT.map(([title, zones]) => `
+  const lotButton = (f, site) => {
+    const u = pct(by.get(f));
+    const name = shortFloor(f).replace(/^장기\s*P[123]\s*/, '').replace(/^P5\s*/, '') || shortFloor(f);
+    return `<button type="button" class="lot" data-floor="${f}"
+      aria-pressed="${f === focusedFloor}">
+      <span class="lot-name">${name}</span>
+      <span class="gauge"><i style="width:${u ?? 0}%"></i></span>
+      <span class="num">${u === null ? '—' : u + '%'}</span>
+    </button>`;
+  };
+
+  document.getElementById('terminals').innerHTML = LAYOUT.map(t => `
     <div class="terminal">
-      <h3>${title}</h3>
-      ${zones.map(([kind, label, sites]) => `
-        <div class="zone ${kind}">
-          <h4>${label}</h4>
-          ${sites.map(([site, floors]) => {
-            const rs = floors.map(f => by.get(f)).filter(Boolean);
-            const cap = rs.reduce((a, r) => a + r.capacity, 0);
-            const free = rs.reduce((a, r) => a + r.available, 0);
-            return `<div class="site">
-              <div class="site-head"><span>${site}</span>
-                <span class="num">${free.toLocaleString('ko-KR')} / ${cap.toLocaleString('ko-KR')}면</span></div>
-              ${floors.map(f => {
-                const u = pct(by.get(f));
-                return `<button type="button" class="lot" data-floor="${f}"
-                  ${f === focusedFloor ? 'aria-pressed="true"' : 'aria-pressed="false"'}>
-                  <span class="lot-name">${shortFloor(f).replace(site.split(' ')[0], '').trim() || shortFloor(f)}</span>
-                  <span class="gauge"><i style="width:${u ?? 0}%"></i></span>
-                  <span class="num">${u === null ? '—' : u + '%'}</span>
-                </button>`;
-              }).join('')}
-            </div>`;
-          }).join('')}
+      <h3>${t.title}</h3>
+      <div class="terminal-top">${t.title.split(' ')[0]} 건물</div>
+      <p class="away">↓ ${t.away}</p>
+      ${t.axis ? `<div class="axis"><span>${t.axis[0]}</span><span>${t.axis[1]}</span></div>` : ''}
+      ${t.bands.map(b => `
+        <div class="band ${b.access}">
+          <div class="band-label">${b.label}</div>
+          <div class="band-cells">
+            ${b.cells.map(c => {
+              const rs = c.floors.map(f => by.get(f)).filter(Boolean);
+              const cap = rs.reduce((a, r) => a + r.capacity, 0);
+              const free = rs.reduce((a, r) => a + r.available, 0);
+              return `<div class="site${c.wide ? ' wide' : ''}${c.staff ? ' staff' : ''}">
+                <div class="site-head"><span>${c.site}</span>
+                  ${c.staff ? '' : `<span class="num">${free.toLocaleString('ko-KR')} / ${cap.toLocaleString('ko-KR')}면</span>`}</div>
+                <div class="site-note">${c.note}</div>
+                ${c.floors.map(f => lotButton(f, c.site)).join('')}
+              </div>`;
+            }).join('')}
+          </div>
         </div>`).join('')}
     </div>`).join('');
 }
@@ -568,79 +573,12 @@ document.getElementById('terminals').addEventListener('click', e => {
   const floor = e.target.closest('.lot')?.dataset.floor;
   if (!floor) return;
   focusedFloor = focusedFloor === floor ? null : floor;
-  renderDetail();
   renderLayout();
   applyFocus();
   if (focusedFloor) {
     showTab('series');
     document.getElementById('panel-series').scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
-});
-
-// 표 정렬 상태. 기본은 사용률 높은 순 — "어디가 찼나"가 먼저 알고 싶은 값이다.
-let sortKey = 'used', sortAsc = false;
-let detailRows = [];
-
-function renderDetail() {
-  const rows = detailRows.filter(passesFilter).map(r => ({
-    ...r, used: r.capacity ? (r.capacity - r.available) / r.capacity * 100 : 0,
-  }));
-  const dir = sortAsc ? 1 : -1;
-  rows.sort((a, b) => {
-    const x = a[sortKey], y = b[sortKey];
-    return (typeof x === 'string' ? x.localeCompare(y, 'ko') : x - y) * dir;
-  });
-
-  // 걸러져 사라진 구역이 계속 강조돼 있으면 안 된다.
-  if (focusedFloor && !rows.some(r => r.floor === focusedFloor)) focusedFloor = null;
-
-  document.getElementById('detail-rows').innerHTML = rows.map(r => `
-    <tr data-floor="${r.floor}"${r.floor === focusedFloor ? ' aria-selected="true"' : ''}>
-      <td>${r.floor}</td>
-      <td>${r.terminal}</td>
-      <td>${r.kind}</td>
-      <td class="num">${r.available.toLocaleString('ko-KR')}</td>
-      <td class="num">${r.capacity.toLocaleString('ko-KR')}</td>
-      <td><span class="pct-cell"><span class="num">${Math.round(r.used)}%</span>
-        <span class="gauge"><i style="width:${Math.round(r.used)}%"></i></span></span></td>
-    </tr>`).join('');
-
-  for (const th of document.querySelectorAll('thead th')) {
-    if (th.dataset.sort === sortKey) th.setAttribute('aria-sort', sortAsc ? 'ascending' : 'descending');
-    else th.removeAttribute('aria-sort');
-  }
-}
-
-const tbody = document.getElementById('detail-rows');
-
-tbody.addEventListener('click', e => {
-  const floor = e.target.closest('tr')?.dataset.floor;
-  if (!floor) return;
-  focusedFloor = focusedFloor === floor ? null : floor;
-  renderDetail();
-  renderLayout();
-  applyFocus();
-  if (focusedFloor) {
-    showTab('series');
-    document.getElementById('panel-series').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
-});
-
-tbody.addEventListener('mouseover', e => {
-  const floor = e.target.closest('tr')?.dataset.floor ?? null;
-  if (floor !== hoverFloor) { hoverFloor = floor; applyFocus(); }
-});
-
-tbody.addEventListener('mouseleave', () => {
-  if (hoverFloor !== null) { hoverFloor = null; applyFocus(); }
-});
-
-document.querySelector('thead').addEventListener('click', e => {
-  const key = e.target.closest('th')?.dataset.sort;
-  if (!key) return;
-  if (key === sortKey) sortAsc = !sortAsc;
-  else { sortKey = key; sortAsc = key === 'floor' || key === 'terminal' || key === 'kind'; }
-  renderDetail();
 });
 
 let seriesChart, patternChart;
@@ -832,7 +770,7 @@ const activeTab = () =>
 
 // 필터는 카드와 두 차트 모두에 걸린다. 서버 왕복 없이 다시 그리기만 한다.
 function refreshAll() {
-  renderDetail();          // 표는 이미 받아둔 데이터로 즉시 다시 그린다
+  renderLayout();          // 배치도는 이미 받아둔 데이터로 즉시 다시 그린다
   loadCurrent();
   (activeTab() === 'series' ? loadSeries : loadPattern)();
 }
