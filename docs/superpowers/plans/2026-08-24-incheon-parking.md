@@ -245,11 +245,13 @@ from datetime import datetime
 
 API_URL = "https://apis.data.go.kr/B551177/StatusOfParking/getTrackingParking"
 
+# 순서가 중요하다. strptime의 %M/%S는 1자리도 매칭하므로, 14자리 포맷을 먼저 두면
+# "202608241305"가 13:00:05로 조용히 잘못 파싱된다. 12자리를 먼저 시도한다.
 DATETM_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
-    "%Y%m%d%H%M%S",
     "%Y%m%d%H%M",
+    "%Y%m%d%H%M%S",
 )
 
 
