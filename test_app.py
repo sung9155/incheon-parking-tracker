@@ -314,30 +314,6 @@ def test_endpoints_return_grouped_rows(tmp_path, monkeypatch):
         assert pattern[0]["samples"] == 1
 
 
-def test_series_endpoint_windows_from_now(tmp_path, monkeypatch):
-    import time
-
-    monkeypatch.setenv("COLLECT", "0")
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
-
-    con = db.connect(tmp_path / "t.db")
-    known_floor = next(iter(app.FLOOR_GROUPS))
-    now = int(time.time())
-    db.insert_rows(con, [
-        (now - 600, known_floor, 40, 100),        # 창 안
-        (now - 5 * DAY, known_floor, 10, 100),    # 창 밖
-    ])
-    con.close()
-
-    with TestClient(app.app) as client:
-        rows = client.get("/api/series?days=1").json()
-
-    # days=1은 짧은 범위라 300초 버킷을 탄다 — (now - 600)을 그대로가 아니라
-    # 버킷 경계로 반올림한 값과 비교한다.
-    bucket = db.SHORT_BUCKET_SECONDS
-    assert [r["ts"] for r in rows] == [((now - 600) // bucket) * bucket]
-
-
 def test_collect_failure_never_logs_the_service_key(caplog):
     import logging
 
@@ -464,3 +440,104 @@ def test_startup_makes_collect_success_visible(tmp_path, monkeypatch, capfd):
     finally:
         app.log.handlers[:] = saved_handlers
         app.log.level, app.log.propagate = saved_level, saved_propagate
+
+
+# ---------------------------------------------------------------- 날짜 범위 조회
+
+def test_day_range_epoch_covers_the_whole_local_day():
+    start, end = app.day_range_epoch("2026-09-24", "2026-09-24")
+
+    assert datetime.fromtimestamp(start) == datetime(2026, 9, 24, 0, 0, 0)
+    assert datetime.fromtimestamp(end) == datetime(2026, 9, 24, 23, 59, 59)
+
+
+def test_day_range_epoch_spans_multiple_days():
+    start, end = app.day_range_epoch("2026-09-24", "2026-09-27")
+
+    assert datetime.fromtimestamp(start) == datetime(2026, 9, 24, 0, 0, 0)
+    assert datetime.fromtimestamp(end) == datetime(2026, 9, 27, 23, 59, 59)
+
+
+def test_series_endpoint_honours_an_explicit_date_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    con = db.connect(tmp_path / "t.db")
+    inside = int(datetime(2026, 9, 24, 12, 0).timestamp())
+    before = int(datetime(2026, 9, 23, 12, 0).timestamp())
+    after = int(datetime(2026, 9, 25, 12, 0).timestamp())
+    db.insert_rows(con, [
+        (before, "A", 10, 100),
+        (inside, "A", 20, 100),
+        (after, "A", 30, 100),
+    ])
+    con.close()
+
+    with TestClient(app.app) as client:
+        rows = client.get("/api/series?from=2026-09-24&to=2026-09-24").json()
+
+    bucket = (inside // db.SHORT_BUCKET_SECONDS) * db.SHORT_BUCKET_SECONDS
+    assert [r["ts"] for r in rows] == [bucket]
+
+
+# ------------------------------------------------------------------- 황금연휴
+
+def test_golden_holidays_finds_chuseok_2026():
+    # 2026 추석: 9/24(목) 전날, 9/25(금) 추석, 9/26(토) 다음날, 9/27(일) -> 4일
+    runs = app.golden_holidays("2026-09-01", "2026-09-30")
+
+    chuseok = [r for r in runs if r["start"] == "2026-09-24"]
+    assert len(chuseok) == 1
+    assert chuseok[0] == {"start": "2026-09-24", "end": "2026-09-27",
+                          "name": "추석", "days": 4}
+
+
+def test_golden_holidays_finds_lunar_new_year_2026():
+    # 2/14(토) 2/15(일) + 설날 2/16~2/18 -> 5일. 음력 기반이라 계산으로는 못 구한다.
+    runs = app.golden_holidays("2026-02-01", "2026-02-28")
+
+    seollal = [r for r in runs if r["name"] == "설날"]
+    assert len(seollal) == 1
+    assert seollal[0]["start"] == "2026-02-14"
+    assert seollal[0]["end"] == "2026-02-18"
+    assert seollal[0]["days"] == 5
+
+
+def test_golden_holidays_ignores_constitution_day():
+    # 제헌절(7/17)은 2008년부터 공휴일이 아니다. holidays 패키지는 아직 포함하므로
+    # 걸러내야 한다 — 2026년에는 금요일이라 그대로 두면 7/17~7/19가 가짜 3일 연휴가 된다.
+    runs = app.golden_holidays("2026-07-01", "2026-07-31")
+
+    assert runs == []
+
+
+def test_golden_holidays_ignores_a_plain_weekend():
+    runs = app.golden_holidays("2026-07-11", "2026-07-12")   # 토·일뿐
+
+    assert runs == []
+
+
+def test_golden_holidays_returns_a_run_overlapping_the_window_whole():
+    # 창을 연휴 한복판으로 잘라도 구간 전체를 돌려줘야 음영이 잘리지 않는다.
+    runs = app.golden_holidays("2026-09-25", "2026-09-25")
+
+    assert [r["start"] for r in runs] == ["2026-09-24"]
+    assert [r["end"] for r in runs] == ["2026-09-27"]
+
+
+def test_holidays_endpoint_returns_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        runs = client.get("/api/holidays?from=2026-09-01&to=2026-09-30").json()
+
+    assert {"start": "2026-09-24", "end": "2026-09-27", "name": "추석", "days": 4} in runs
+
+
+def test_golden_holidays_ignores_constitution_day_substitute():
+    # 제헌절이 토요일인 해에는 월요일에 "제헌절 대체 휴일"이 붙는다. 정확 일치로만
+    # 거르면 이게 빠져나가 토·일·월 3일짜리 가짜 연휴가 된다. 2027년이 그런 해다.
+    runs = app.golden_holidays("2027-07-01", "2027-07-31")
+
+    assert runs == []

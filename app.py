@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime, time as clock, timedelta
 from urllib.parse import unquote
 
+import holidays
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 
 import db
@@ -177,6 +177,93 @@ async def collect_loop(con, key: str) -> None:
             await asyncio.sleep(COLLECT_INTERVAL_SECONDS)
 
 
+# ---------------------------------------------------------------- 날짜 · 공휴일
+
+# 제헌절은 2008년부터 공휴일이 아니다. holidays 패키지는 아직 포함하고 있어서, 그대로
+# 두면 제헌절이 금요일인 해마다 금·토·일이 가짜 "황금연휴"로 잡힌다.
+NOT_A_DAY_OFF = frozenset({"제헌절"})
+
+# 연휴로 치는 최소 연속 일수. 주말 이틀만으로는 잡히지 않는다.
+GOLDEN_HOLIDAY_MIN_DAYS = 3
+
+# 요청 구간에 걸친 연휴는 잘리지 않고 통째로 반환해야 차트 음영이 온전하다. 구간 밖으로
+# 얼마나 더 훑을지 — 한국에서 가장 긴 연휴도 이 안에 들어온다.
+_RUN_SCAN_PAD_DAYS = 12
+
+_NAME_SUFFIXES = (" 전날", " 다음날", " 대체 휴일", " 대체휴일")
+
+
+def parse_date(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def day_range_epoch(from_value: str, to_value: str) -> tuple[int, int]:
+    """`YYYY-MM-DD` 두 개를 그 날들을 온전히 덮는 epoch 구간으로 바꾼다.
+
+    parse_datetm과 같은 규약으로 로컬 시간대(컨테이너의 TZ=Asia/Seoul) 자정을 쓴다.
+    """
+    first, last = parse_date(from_value), parse_date(to_value)
+    start = int(datetime.combine(first, clock.min).timestamp())
+    end = int(datetime.combine(last, clock.max).timestamp())
+    return start, end
+
+
+def _base_name(name: str) -> str:
+    """'설날 다음날' -> '설날', '신정연휴' -> '신정'."""
+    for suffix in _NAME_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    if name.endswith("연휴") and len(name) > 2:
+        return name[:-2]
+    return name
+
+
+def golden_holidays(from_value: str, to_value: str) -> list[dict]:
+    """구간에 걸친 황금연휴 목록. 주말과 공휴일이 연속으로 이어지는 구간을 묶는다."""
+    first, last = parse_date(from_value), parse_date(to_value)
+    scan_from = first - timedelta(days=_RUN_SCAN_PAD_DAYS)
+    scan_to = last + timedelta(days=_RUN_SCAN_PAD_DAYS)
+    calendar = holidays.country_holidays(
+        "KR", years=list(range(scan_from.year, scan_to.year + 1)), language="ko"
+    )
+
+    runs, run = [], []
+    day = scan_from
+    while day <= scan_to:
+        name = calendar.get(day)
+        # 기본 이름으로 걸러야 한다 — "제헌절 대체 휴일"처럼 접미사가 붙은 형태는
+        # 정확 일치로는 빠져나간다(제헌절이 토요일인 해에 실제로 그렇게 된다).
+        if name is not None and _base_name(name) in NOT_A_DAY_OFF:
+            name = None
+        if name is not None or day.weekday() >= 5:      # 5,6 = 토,일
+            run.append((day, name))
+        elif run:
+            runs.append(run)
+            run = []
+        day += timedelta(days=1)
+    if run:
+        runs.append(run)
+
+    out = []
+    for entry in runs:
+        if len(entry) < GOLDEN_HOLIDAY_MIN_DAYS:
+            continue
+        start, end = entry[0][0], entry[-1][0]
+        if end < first or start > last:                  # 구간과 겹치지 않는다
+            continue
+        names = []
+        for _, name in entry:
+            if name and (base := _base_name(name)) not in names:
+                names.append(base)
+        out.append({
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "name": "·".join(names) or "주말",
+            "days": len(entry),
+        })
+    return out
+
+
 def _attach_log_handler() -> None:
     """uvicorn이 로깅을 설정한 뒤에 호출해야 한다.
 
@@ -242,9 +329,20 @@ def api_current():
 
 
 @app.get("/api/series")
-def api_series(days: int = 1):
-    end = int(time.time())
-    return [_with_group(r) for r in db.series(app.state.con, end - days * 86400, end)]
+def api_series(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+):
+    start, end = day_range_epoch(from_value, to_value)
+    return [_with_group(r) for r in db.series(app.state.con, start, end)]
+
+
+@app.get("/api/holidays")
+def api_holidays(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+):
+    return golden_holidays(from_value, to_value)
 
 
 @app.get("/api/pattern")

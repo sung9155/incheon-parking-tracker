@@ -14,6 +14,7 @@
     --grid: #e1e0d9;
     --baseline: #c3c2b7;
     --border: rgba(11, 11, 11, 0.10);
+    --holiday-shade: rgba(191, 106, 46, 0.10);
     /* categorical palette, fixed order — never reassigned by rank (see dataviz skill) */
     --series-1: #2a78d6; /* blue */
     --series-2: #eb6834; /* orange */
@@ -34,6 +35,7 @@
       --grid: #2c2c2a;
       --baseline: #383835;
       --border: rgba(255, 255, 255, 0.10);
+      --holiday-shade: rgba(230, 152, 84, 0.13);
       --series-1: #3987e5;
       --series-2: #d95926;
       --series-3: #199e70;
@@ -65,12 +67,61 @@
   .hidden { display: none; }
   #stamp, #thin { color: var(--text-secondary); font-size: .9rem; }
   .chart-box { position: relative; height: 22rem; margin-top: .5rem; }
-  select { font: inherit; }
+  .card-sub { display: block; font-size: .82rem; color: var(--text-secondary); }
+  .gauge { display: block; height: 4px; margin-top: .5rem; border-radius: 999px;
+    background: var(--border); overflow: hidden; }
+  .gauge i { display: block; height: 100%; background: var(--series-1); border-radius: 999px; }
+
+  select, input[type="date"] { font: inherit; color: var(--text-primary);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: .375rem; padding: .3rem .5rem; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: flex-end;
+    margin: 1rem 0 .25rem; padding: .85rem 1rem; border: 1px solid var(--border);
+    border-radius: .5rem; background: var(--surface); }
+  .toolbar fieldset { border: 0; margin: 0; padding: 0; }
+  .toolbar legend { padding: 0 0 .35rem; font-size: .8rem; color: var(--text-secondary); }
+  .chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .chip { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 999px; padding: .25rem .7rem;
+    font-size: .9rem; user-select: none; }
+  .chip:has(input:checked) { border-color: var(--series-1); font-weight: 600; }
+  .chip:has(input:focus-visible) { outline: 2px solid var(--series-1); outline-offset: 2px; }
+  .chip input { margin: 0; }
+  .range { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+  .quick button { padding: .3rem .6rem; font-size: .85rem; }
+  #holiday-jump { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0 0; }
+  #holiday-jump button { font-size: .85rem; padding: .25rem .6rem; }
+  #empty-note { color: var(--text-secondary); font-size: .9rem; margin: .6rem 0 0; }
 </style>
 
 <h1>인천공항 주차 현황</h1>
 <p id="stamp"></p>
 <div class="cards" id="cards"></div>
+
+<div class="toolbar">
+  <fieldset>
+    <legend>터미널</legend>
+    <div class="chips" id="filter-terminal"></div>
+  </fieldset>
+  <fieldset>
+    <legend>주차 유형</legend>
+    <div class="chips" id="filter-kind"></div>
+  </fieldset>
+  <fieldset>
+    <legend>기간</legend>
+    <div class="range">
+      <input type="date" id="from" aria-label="시작 날짜">
+      <span>~</span>
+      <input type="date" id="to" aria-label="종료 날짜">
+      <span class="quick">
+        <button type="button" data-days="1">1일</button>
+        <button type="button" data-days="7">7일</button>
+        <button type="button" data-days="30">30일</button>
+      </span>
+    </div>
+  </fieldset>
+</div>
 
 <div class="tabs" role="tablist">
   <button id="tab-series" role="tab" aria-selected="true" aria-controls="panel-series">실측 추이</button>
@@ -78,18 +129,12 @@
 </div>
 
 <div id="panel-series" role="tabpanel" aria-labelledby="tab-series">
-  <label>기간
-    <select id="days">
-      <option value="1">1일</option>
-      <option value="7" selected>7일</option>
-      <option value="30">30일</option>
-    </select>
-  </label>
+  <div id="holiday-jump"></div>
+  <p id="empty-note" class="hidden">이 기간에는 수집된 데이터가 없습니다.</p>
   <div class="chart-box"><canvas id="chart-series"></canvas></div>
 </div>
 
 <div id="panel-pattern" class="hidden" role="tabpanel" aria-labelledby="tab-pattern">
-  <label>그룹 <select id="group"></select></label>
   <p id="thin" class="hidden">표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.</p>
   <div class="chart-box"><canvas id="chart-pattern"></canvas></div>
 </div>
@@ -97,12 +142,90 @@
 <script>
 const groupKey = r => `${r.terminal} ${r.kind}`;
 
+// --- 필터 -----------------------------------------------------------------
+// 서버는 항상 전체를 보내고, 걸러내는 일은 여기서만 한다. 행마다 terminal/kind가
+// 붙어 오므로 필터를 바꿔도 재조회가 필요 없다.
+const TERMINALS = ['T1', 'T2'];
+const KINDS = ['단기', '장기', '예약'];
+const filters = { terminal: new Set(TERMINALS), kind: new Set(KINDS) };
+
+function buildChips(containerId, values, axis, onChange) {
+  document.getElementById(containerId).innerHTML = values.map(v => `
+    <label class="chip"><input type="checkbox" value="${v}" checked>${v}</label>`).join('');
+  document.getElementById(containerId).addEventListener('change', e => {
+    const { value, checked } = e.target;
+    checked ? filters[axis].add(value) : filters[axis].delete(value);
+    onChange();
+  });
+}
+
+const passesFilter = r => filters.terminal.has(r.terminal) && filters.kind.has(r.kind);
+
+// --- 날짜 -----------------------------------------------------------------
+// input[type=date]는 로컬 기준 YYYY-MM-DD를 주고받는다. 서버도 같은 문자열을
+// 컨테이너 로컬 자정으로 해석하므로 변환이 필요 없다.
+const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+function setRange(days) {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - (days - 1));
+  document.getElementById('from').value = isoDate(from);
+  document.getElementById('to').value = isoDate(to);
+}
+
+const currentRange = () => ({
+  from: document.getElementById('from').value,
+  to: document.getElementById('to').value,
+});
+
+// --- 연휴 음영 -------------------------------------------------------------
+// Chart.js annotation 플러그인을 쓰지 않는다. 사각형 몇 개 그리자고 의존성을
+// 늘릴 이유가 없고, 이미 crosshair도 같은 방식으로 되어 있다.
+let holidayRuns = [];
+
+const holidayShade = {
+  id: 'holidayShade',
+  beforeDatasetsDraw(chart) {
+    if (!holidayRuns.length) return;
+    const { ctx, chartArea: area, scales: { x } } = chart;
+    const stamps = chart.$stamps || [];
+    if (!stamps.length) return;
+
+    ctx.save();
+    for (const run of holidayRuns) {
+      const startTs = new Date(`${run.start}T00:00:00`).getTime() / 1000;
+      const endTs = new Date(`${run.end}T23:59:59`).getTime() / 1000;
+      // 라벨 인덱스 축이므로 구간에 걸리는 첫/마지막 데이터 포인트를 찾는다.
+      let first = -1, last = -1;
+      for (let i = 0; i < stamps.length; i++) {
+        if (stamps[i] >= startTs && stamps[i] <= endTs) {
+          if (first === -1) first = i;
+          last = i;
+        }
+      }
+      if (first === -1) continue;
+      const left = x.getPixelForValue(first);
+      const right = x.getPixelForValue(last);
+      ctx.fillStyle = cssVar('--holiday-shade');
+      ctx.fillRect(left, area.top, Math.max(right - left, 2), area.bottom - area.top);
+
+      ctx.fillStyle = cssVar('--text-secondary');
+      ctx.font = '600 11px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(`${run.name} ${run.days}일`, left + 4, area.top + 13);
+    }
+    ctx.restore();
+  },
+};
+Chart.register(holidayShade);
+
 // 구역별 행을 그룹 단위로 합산한다. keyFields는 그룹 외 추가 축(ts 또는 dow+hour).
-function sumByGroup(rows, keyFields) {
+function sumByGroup(rows, keyFields, field = 'available') {
   const acc = new Map();
   for (const r of rows) {
     const k = JSON.stringify([groupKey(r), ...keyFields.map(f => r[f])]);
-    acc.set(k, (acc.get(k) ?? 0) + r.available);
+    acc.set(k, (acc.get(k) ?? 0) + r[field]);
   }
   return acc;
 }
@@ -184,31 +307,42 @@ function commonLineOptions(yTitle) {
 }
 
 async function loadCurrent() {
-  const rows = await (await fetch('/api/current')).json();
+  const all = await (await fetch('/api/current')).json();
+  const rows = all.filter(passesFilter);
   const totals = sumByGroup(rows, []);
+  const caps = sumByGroup(rows, [], 'capacity');
   document.getElementById('cards').innerHTML = [...totals]
-    .map(([k, v]) => `<div class="card">${JSON.parse(k)[0]}<b>${Math.round(v)}</b>자리</div>`)
-    .join('');
-  if (rows.length) {
+    .map(([k, free]) => {
+      const cap = caps.get(k) ?? 0;
+      const pct = cap ? Math.round(free / cap * 100) : 0;
+      return `<div class="card">${JSON.parse(k)[0]}
+        <b>${Math.round(free).toLocaleString('ko-KR')}</b>
+        <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 여유 ${pct}%</span>
+        <span class="gauge"><i style="width:${pct}%"></i></span>
+      </div>`;
+    }).join('');
+  // 필터와 무관하게 전체 응답 기준으로 찍는다 — 필터를 다 꺼도 수집 시각은 유효하다.
+  if (all.length) {
     document.getElementById('stamp').textContent =
-      '갱신: ' + new Date(Math.max(...rows.map(r => r.ts)) * 1000).toLocaleString('ko-KR');
-  }
-  const sel = document.getElementById('group');
-  const groups = [...new Set(rows.map(groupKey))];
-  const current = [...sel.options].map(o => o.value);
-  const changed = current.length !== groups.length || !groups.every(g => current.includes(g));
-  if (changed) {
-    const prev = sel.value;
-    sel.innerHTML = groups.map(g => `<option>${g}</option>`).join('');
-    if (groups.includes(prev)) sel.value = prev; // don't silently swap the user's selection
+      '갱신: ' + new Date(Math.max(...all.map(r => r.ts)) * 1000).toLocaleString('ko-KR');
   }
 }
 
 let seriesChart, patternChart;
 
 async function loadSeries() {
-  const days = document.getElementById('days').value;
-  const rows = await (await fetch(`/api/series?days=${days}`)).json();
+  const { from, to } = currentRange();
+  if (!from || !to || from > to) return;
+  const q = `from=${from}&to=${to}`;
+  const [all, runs] = await Promise.all([
+    fetch(`/api/series?${q}`).then(r => r.json()),
+    fetch(`/api/holidays?${q}`).then(r => r.json()),
+  ]);
+  holidayRuns = runs;
+  renderHolidayJump(runs);
+
+  const rows = all.filter(passesFilter);
+  document.getElementById('empty-note').classList.toggle('hidden', rows.length > 0);
   const groups = [...new Set(rows.map(groupKey))];
   const stamps = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
   const totals = sumByGroup(rows, ['ts']);
@@ -241,12 +375,19 @@ async function loadSeries() {
     },
     options: commonLineOptions('가용 면수'),
   });
+  seriesChart.$stamps = stamps;   // 음영 플러그인이 라벨 인덱스를 찾는 데 쓴다
+  seriesChart.update();
+}
+
+function renderHolidayJump(runs) {
+  document.getElementById('holiday-jump').innerHTML = runs.map(r =>
+    `<button type="button" data-from="${r.start}" data-to="${r.end}">${r.name} ${r.days}일</button>`
+  ).join('');
 }
 
 async function loadPattern() {
   const rows = await (await fetch('/api/pattern')).json();
-  const target = document.getElementById('group').value;
-  const mine = rows.filter(r => groupKey(r) === target);
+  const mine = rows.filter(passesFilter);
 
   const avail = sumByGroup(mine, ['dow', 'hour']);
 
@@ -264,7 +405,14 @@ async function loadPattern() {
     const color = dowColor(dow);
     return {
       label: name,
-      data: hours.map(h => avail.get(JSON.stringify([target, dow, h])) ?? null),
+      data: hours.map(h => {
+        let sum = null;
+        for (const g of new Set(mine.map(groupKey))) {
+          const v = avail.get(JSON.stringify([g, dow, h]));
+          if (v !== undefined) sum = (sum ?? 0) + v;
+        }
+        return sum;
+      }),
       spanGaps: true,
       pointRadius: 0,
       pointHoverRadius: 4,
@@ -295,17 +443,52 @@ function showTab(which) {
   (which === 'series' ? loadSeries : loadPattern)();
 }
 
+const activeTab = () =>
+  document.getElementById('tab-series').getAttribute('aria-selected') === 'true'
+    ? 'series' : 'pattern';
+
+// 필터는 카드와 두 차트 모두에 걸린다. 서버 왕복 없이 다시 그리기만 한다.
+function refreshAll() {
+  loadCurrent();
+  (activeTab() === 'series' ? loadSeries : loadPattern)();
+}
+
 document.getElementById('tab-series').onclick = () => showTab('series');
 document.getElementById('tab-pattern').onclick = () => showTab('pattern');
-document.getElementById('days').onchange = loadSeries;
-document.getElementById('group').onchange = loadPattern;
+
+buildChips('filter-terminal', TERMINALS, 'terminal', refreshAll);
+buildChips('filter-kind', KINDS, 'kind', refreshAll);
+
+document.getElementById('from').onchange = loadSeries;
+document.getElementById('to').onchange = loadSeries;
+
+document.querySelector('.quick').addEventListener('click', e => {
+  const days = e.target.dataset.days;
+  if (!days) return;
+  setRange(Number(days));
+  loadSeries();
+});
+
+// 연휴 칩: 앞뒤로 하루씩 여유를 둬서 연휴 직전·직후의 변화까지 보이게 한다.
+document.getElementById('holiday-jump').addEventListener('click', e => {
+  const { from, to } = e.target.dataset;
+  if (!from) return;
+  const pad = (iso, days) => {
+    const d = new Date(`${iso}T00:00:00`);
+    d.setDate(d.getDate() + days);
+    return isoDate(d);
+  };
+  document.getElementById('from').value = pad(from, -1);
+  document.getElementById('to').value = pad(to, 1);
+  showTab('series');
+});
 
 // 시스템 다크모드 전환 시 캔버스 색상(변수라 CSS만으로는 안 바뀜)을 다시 그린다.
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  const active = document.getElementById('tab-series').getAttribute('aria-selected') === 'true';
-  (active ? loadSeries : loadPattern)();
+  (activeTab() === 'series' ? loadSeries : loadPattern)();
 });
 
+setRange(7);
 loadCurrent().then(loadSeries);
 setInterval(loadCurrent, 60_000);
 </script>
