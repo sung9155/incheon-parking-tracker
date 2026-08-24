@@ -136,14 +136,25 @@
   .site-head { display: flex; justify-content: space-between; align-items: baseline;
     gap: .5rem; font-size: .85rem; font-weight: 600; }
   .site-head .num { font-weight: 400; color: var(--text-secondary); }
-  .lot { display: flex; align-items: center; gap: .5rem; width: 100%; margin-top: .4rem;
-    padding: .3rem .4rem; border: 0; border-radius: .25rem; background: transparent;
+  .lot { display: grid; grid-template-columns: 1fr auto auto; column-gap: .55rem;
+    align-items: center; width: 100%; margin-top: .4rem;
+    padding: .35rem .4rem; border: 0; border-radius: .25rem; background: transparent;
     font: inherit; font-size: .82rem; color: var(--text-primary); cursor: pointer; text-align: left; }
+  .lot-sub { grid-column: 1; grid-row: 2; font-size: .72rem; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums; }
+  .lot .gauge { grid-column: 2; grid-row: 1 / 3; align-self: center; }
+  .lot .num { grid-column: 3; grid-row: 1 / 3; align-self: center; }
   .lot:hover { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
   .lot[aria-pressed="true"] { background: color-mix(in srgb, var(--series-1) 18%, transparent);
     font-weight: 700; }
-  .lot-name { flex: 1; }
-  .lot .gauge { width: 3.5rem; margin: 0; flex: none; }
+  .lot-name { grid-column: 1; grid-row: 1; }
+  .lot .gauge { width: 3.5rem; margin: 0; }
+  /* T1의 P1/P2처럼 2열로 나뉘는 셀은 좁다. 게이지를 줄이고 글자도 한 단계 낮춘다. */
+  .band-cells:not(:has(.site.wide)) .lot .gauge { width: 2.25rem; }
+  .lot-sub { white-space: nowrap; }
+  /* 게이지가 작아진 만큼 숫자에도 혼잡도 색을 실어 신호가 죽지 않게 한다. */
+  .lot .num.mid { color: var(--occ-mid); }
+  .lot .num.high { color: var(--occ-high); font-weight: 700; }
   .lot .num { min-width: 2.4rem; text-align: right; color: var(--text-secondary); }
   #layout-note { color: var(--text-secondary); font-size: .85rem; margin: 1rem 0 0; }
   .num { font-variant-numeric: tabular-nums; }
@@ -545,13 +556,18 @@ function renderLayout() {
   const pct = r => r && r.capacity ? Math.round((r.capacity - r.available) / r.capacity * 100) : null;
 
   const lotButton = (f, site) => {
-    const u = pct(by.get(f));
+    const r = by.get(f);
+    const u = pct(r);
     const name = shortFloor(f).replace(/^장기\s*P[123]\s*/, '').replace(/^P5\s*/, '') || shortFloor(f);
+    const n = v => v.toLocaleString('ko-KR');
+    // 주차 대수 / 전체 면수. 옆에 붙는 사용률 %가 이 두 숫자의 비율이라 서로 검산된다.
+    const sub = r ? `${n(r.parked)} / ${n(r.capacity)}면` : '데이터 없음';
     return `<button type="button" class="lot" data-floor="${f}"
       aria-pressed="${f === focusedFloor}">
       <span class="lot-name">${name}</span>
+      <span class="lot-sub">${sub}</span>
       <span class="gauge${occClass(u)}"><i style="width:${u ?? 0}%"></i></span>
-      <span class="num">${u === null ? '—' : u + '%'}</span>
+      <span class="num${occClass(u)}">${u === null ? '—' : u + '%'}</span>
     </button>`;
   };
 
@@ -568,10 +584,10 @@ function renderLayout() {
             ${b.cells.map(c => {
               const rs = c.floors.map(f => by.get(f)).filter(Boolean);
               const cap = rs.reduce((a, r) => a + r.capacity, 0);
-              const free = rs.reduce((a, r) => a + r.available, 0);
+              const parked = rs.reduce((a, r) => a + r.parked, 0);
               return `<div class="site${c.wide ? ' wide' : ''}${c.staff ? ' staff' : ''}">
                 <div class="site-head"><span>${c.site}</span>
-                  ${c.staff ? '' : `<span class="num">${free.toLocaleString('ko-KR')} / ${cap.toLocaleString('ko-KR')}면</span>`}</div>
+                  ${c.staff ? '' : `<span class="num">${parked.toLocaleString('ko-KR')} / ${cap.toLocaleString('ko-KR')}면</span>`}</div>
                 <div class="site-note">${c.note}</div>
                 ${c.floors.map(f => lotButton(f, c.site)).join('')}
               </div>`;
