@@ -1,3 +1,5 @@
+import json
+import os
 from datetime import datetime
 
 import pytest
@@ -36,6 +38,11 @@ def test_parse_datetm_accepts_known_formats():
     assert app.parse_datetm("202608241305") == expected
     assert app.parse_datetm("2026-08-24 13:05:00") == expected
     assert app.parse_datetm("20260824130500") == expected
+
+
+def test_parse_datetm_accepts_production_fractional_format():
+    expected = int(datetime(2026, 8, 24, 10, 24, 7).timestamp())
+    assert app.parse_datetm("20260824102407.000") == expected
 
 
 def test_parse_datetm_rejects_unknown_format():
@@ -150,6 +157,31 @@ def test_pattern_groups_by_local_weekday_and_hour(tmp_path):
     assert row["dow"] == int(local.strftime("%w"))
     assert row["available"] == 50.0
     assert row["samples"] == 2
+
+
+def test_every_known_floor_is_mapped():
+    assert app.FLOOR_GROUPS, "FLOOR_GROUPS is empty — run scripts/probe.py first"
+    for floor, group in app.FLOOR_GROUPS.items():
+        assert app.group_of(floor) == group
+
+
+def test_unknown_floor_falls_back_to_etc():
+    assert app.group_of("존재하지 않는 주차장") == ("기타", "기타")
+
+
+def test_every_live_sample_floor_maps_to_a_real_group():
+    sample_path = os.path.join(
+        os.path.dirname(__file__),
+        ".superpowers", "sdd", "2026-08-24-incheon-parking", "live-sample.json",
+    )
+    with open(sample_path, encoding="utf-8") as f:
+        payload = json.load(f)
+
+    rows = app.parse_rows(payload)
+
+    assert len(rows) == 19
+    for _, floor, _, _ in rows:
+        assert app.group_of(floor) != ("기타", "기타")
 
 
 def test_pattern_separates_distinct_hours(tmp_path):
