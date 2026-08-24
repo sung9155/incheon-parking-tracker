@@ -428,3 +428,39 @@ def test_lifespan_fails_loudly_on_empty_service_key(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="SERVICE_KEY"):
         with TestClient(app.app):
             pass
+
+
+def test_startup_makes_collect_success_visible(tmp_path, monkeypatch, capfd):
+    """기동 경로가 끝나면 "collected N rows"가 실제로 로그에 나와야 한다.
+
+    uvicorn은 dictConfig로 자기 로거만 설정하고 root에는 핸들러를 두지 않아서,
+    아무것도 안 하면 log.error만 lastResort로 새어나가고 log.info는 통째로 버려진다.
+    무인 운영에서 수집 성공을 확인할 유일한 신호가 사라진다.
+
+    헬퍼를 직접 부르지 않고 lifespan을 통과시킨다 — 그래야 배선이 빠졌을 때 잡힌다.
+    """
+    import logging
+    import logging.config
+
+    import uvicorn.config
+
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    saved_handlers = list(app.log.handlers)
+    saved_level, saved_propagate = app.log.level, app.log.propagate
+    # 갓 기동한 프로세스와 같은 상태로 되돌려야 전제 자체를 검증할 수 있다.
+    app.log.handlers.clear()
+    app.log.setLevel(logging.NOTSET)
+    app.log.propagate = True
+    try:
+        logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+        assert app.log.getEffectiveLevel() > logging.INFO, "전제: 설정 전에는 INFO가 막혀 있다"
+
+        with TestClient(app.app):
+            app.log.info("collected %d rows", 19)
+
+        assert "collected 19 rows" in capfd.readouterr().err
+    finally:
+        app.log.handlers[:] = saved_handlers
+        app.log.level, app.log.propagate = saved_level, saved_propagate

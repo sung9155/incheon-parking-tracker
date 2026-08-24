@@ -177,8 +177,29 @@ async def collect_loop(con, key: str) -> None:
             await asyncio.sleep(COLLECT_INTERVAL_SECONDS)
 
 
+def _attach_log_handler() -> None:
+    """uvicorn이 로깅을 설정한 뒤에 호출해야 한다.
+
+    uvicorn은 기동 시 dictConfig로 자기 로거들만 설정하고 root에는 핸들러를 두지
+    않는다. 그래서 "parking" 로거는 실효 레벨 WARNING에 핸들러가 없는 상태가 되어,
+    log.error는 logging.lastResort로 stderr에 찍히지만 log.info("collected N rows")는
+    통째로 버려진다. 무인 운영에서 유일한 성공 신호가 로그에 영원히 안 나오는 셈이다.
+
+    import 시점에 basicConfig를 부르는 방법은 통하지 않는다 — uvicorn의 dictConfig가
+    나중에 실행되면서 root 핸들러를 정리한다. 그래서 lifespan에서 우리 로거에만 붙인다.
+    """
+    if log.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _attach_log_handler()
     con = db.connect()
     _app.state.con = con
     task = None
