@@ -15,6 +15,9 @@
     --baseline: #c3c2b7;
     --border: rgba(11, 11, 11, 0.10);
     --holiday-shade: rgba(191, 106, 46, 0.10);
+    --occ-low: #3d8f4e;
+    --occ-mid: #c9821f;
+    --occ-high: #c8402f;
     /* categorical palette, fixed order — never reassigned by rank (see dataviz skill) */
     --series-1: #2a78d6; /* blue */
     --series-2: #eb6834; /* orange */
@@ -36,6 +39,9 @@
       --baseline: #383835;
       --border: rgba(255, 255, 255, 0.10);
       --holiday-shade: rgba(230, 152, 84, 0.13);
+      --occ-low: #62b874;
+      --occ-mid: #e0a244;
+      --occ-high: #f0705c;
       --series-1: #3987e5;
       --series-2: #d95926;
       --series-3: #199e70;
@@ -70,7 +76,9 @@
   .card-sub { display: block; font-size: .82rem; color: var(--text-secondary); }
   .gauge { display: block; height: 4px; margin-top: .5rem; border-radius: 999px;
     background: var(--border); overflow: hidden; }
-  .gauge i { display: block; height: 100%; background: var(--series-1); border-radius: 999px; }
+  .gauge i { display: block; height: 100%; background: var(--occ-low); border-radius: 999px; }
+  .gauge.mid i { background: var(--occ-mid); }
+  .gauge.high i { background: var(--occ-high); }
 
   select, input[type="date"] { font: inherit; color: var(--text-primary);
     background: var(--surface); border: 1px solid var(--border);
@@ -441,7 +449,7 @@ async function loadCurrent() {
       return `<div class="card">${JSON.parse(k)[0]}
         <b>${Math.round(free).toLocaleString('ko-KR')}</b>
         <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 사용 ${usedPct}%</span>
-        <span class="gauge" role="img" aria-label="사용률 ${usedPct}%"><i style="width:${usedPct}%"></i></span>
+        <span class="gauge${occClass(usedPct)}" role="img" aria-label="사용률 ${usedPct}%"><i style="width:${usedPct}%"></i></span>
       </div>`;
     }).join('');
   // 필터와 무관하게 전체 응답 기준으로 찍는다 — 필터를 다 꺼도 수집 시각은 유효하다.
@@ -455,23 +463,27 @@ async function loadCurrent() {
 // 안 읽히므로, 표가 "어디가 찼나"에 답하고 차트는 고른 하나의 추세만 보여준다.
 let focusedFloor = null, hoverFloor = null;
 
-const fade = (hex, a) => {
-  const n = parseInt(hex.replace('#', ''), 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
-};
-
 function applyFocus() {
   if (!seriesChart) return;
   const target = hoverFloor ?? focusedFloor;
   for (const d of seriesChart.data.datasets) {
-    const lit = !target || d.$floor === target;
-    d.borderColor = lit ? d.$color : fade(d.$color, d.$baseline ? 0.3 : 0.12);
-    d.borderWidth = !target ? (d.$baseline ? 1.5 : 2) : (lit ? 3 : 1);
+    // 흐리게 두면 툴팁에 19줄이 그대로 뜬다. 아예 감춰야 고른 것만 남는다.
+    // 기준선은 비교 대상이라 항상 남긴다.
+    d.hidden = !!target && !d.$baseline && d.$floor !== target;
+    d.borderWidth = d.$baseline ? 1.5 : (target ? 3 : 2);
   }
+  // 고른 게 없으면 19줄이 겹쳐 있으므로 툴팁은 커서에 가장 가까운 하나만 — 고른 게
+  // 있으면 두 줄(고른 구역 + 평소)뿐이라 같은 x의 값을 나란히 보여주는 편이 낫다.
+  seriesChart.options.interaction.mode = target ? 'index' : 'nearest';
+  seriesChart.options.plugins.tooltip.mode = seriesChart.options.interaction.mode;
   seriesChart.update('none');
   document.getElementById('focus-note').textContent = focusedFloor
-    ? `${focusedFloor} 만 강조 중 — 같은 행을 다시 누르면 전체로 돌아갑니다.` : '';
+    ? `${focusedFloor} 만 표시 중 — 배치도에서 같은 구역을 다시 누르면 전체로 돌아갑니다.` : '';
 }
+
+// 혼잡도 구간. 90% 이상이면 사실상 자리를 찾기 어렵고, 70%부터는 눈에 띄어야 한다.
+// 색은 보조 신호일 뿐이고 퍼센트 숫자를 항상 옆에 붙여 색만으로 정보를 주지 않는다.
+const occClass = u => (u === null ? '' : u >= 90 ? ' high' : u >= 70 ? ' mid' : '');
 
 // 배치 구조. 방위나 거리가 아니라 "확인된 관계"만 담는다 — 어느 터미널 소속인지,
 // 걸어갈 수 있는지 셔틀을 타야 하는지, 같은 부지에 평면과 타워가 함께 있는지.
@@ -538,7 +550,7 @@ function renderLayout() {
     return `<button type="button" class="lot" data-floor="${f}"
       aria-pressed="${f === focusedFloor}">
       <span class="lot-name">${name}</span>
-      <span class="gauge"><i style="width:${u ?? 0}%"></i></span>
+      <span class="gauge${occClass(u)}"><i style="width:${u ?? 0}%"></i></span>
       <span class="num">${u === null ? '—' : u + '%'}</span>
     </button>`;
   };
