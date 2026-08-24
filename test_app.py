@@ -1,3 +1,4 @@
+import pathlib
 import time
 from datetime import datetime
 
@@ -563,3 +564,19 @@ def test_pattern_reports_capacity_too(tmp_path):
     rows = db.pattern(con)
 
     assert rows[0]["capacity"] == 100
+
+
+def test_layout_diagram_covers_every_mapped_floor():
+    """배치도의 LAYOUT이 FLOOR_GROUPS와 정확히 일치해야 한다.
+
+    공항이 구역을 추가하면 group_of는 "기타"로 흘려보내며 경고를 남기지만, 배치도는
+    조용히 빠뜨린다 — 화면에 없는 주차장이 생기는 셈이라 이 테스트로 잡는다.
+    """
+    import re
+
+    html = pathlib.Path("static/index.html").read_text(encoding="utf-8")
+    block = html[html.index("const LAYOUT = ["):html.index("function renderLayout")]
+    listed = re.findall(r"'(T[12] [^']+)'", block)
+
+    assert len(listed) == len(set(listed)), "배치도에 중복된 구역이 있다"
+    assert set(listed) == set(app.FLOOR_GROUPS)

@@ -114,6 +114,36 @@
   tbody tr[aria-selected="true"] td { background: color-mix(in srgb, var(--series-1) 16%, transparent); }
   tbody tr[aria-selected="true"] td:first-child { font-weight: 700; }
   #focus-note { color: var(--text-secondary); font-size: .85rem; margin: .5rem 0 0; }
+
+  #layout { margin: 2rem 0 0; }
+  #layout h2 { font-size: 1rem; margin: 0 0 .25rem; }
+  .caveat { color: var(--text-secondary); font-size: .85rem; margin: 0 0 1rem; }
+  .terminals { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 1rem; }
+  .terminal { border: 1px solid var(--border); border-radius: .5rem; padding: 1rem; background: var(--surface); }
+  .terminal h3 { font-size: .95rem; margin: 0 0 .75rem; }
+  .zone { margin-bottom: 1rem; }
+  .zone:last-child { margin-bottom: 0; }
+  .zone > h4 { font-size: .8rem; font-weight: 600; color: var(--text-secondary);
+    margin: 0 0 .5rem; display: flex; align-items: center; gap: .4rem; }
+  .zone > h4::before { content: ''; width: .5rem; height: .5rem; border-radius: 50%;
+    background: var(--muted); }
+  .zone.walk > h4::before { background: var(--series-1); }
+  .site { border: 1px solid var(--border); border-radius: .375rem; padding: .5rem .6rem;
+    margin-bottom: .5rem; }
+  .site:last-child { margin-bottom: 0; }
+  .site-head { display: flex; justify-content: space-between; align-items: baseline;
+    gap: .5rem; font-size: .88rem; font-weight: 600; }
+  .site-head .num { font-weight: 400; color: var(--text-secondary); }
+  .lot { display: flex; align-items: center; gap: .5rem; width: 100%; margin-top: .4rem;
+    padding: .3rem .4rem; border: 0; border-radius: .25rem; background: transparent;
+    font: inherit; font-size: .82rem; color: var(--text-primary); cursor: pointer; text-align: left; }
+  .lot:hover { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
+  .lot[aria-pressed="true"] { background: color-mix(in srgb, var(--series-1) 18%, transparent);
+    font-weight: 700; }
+  .lot-name { flex: 1; }
+  .lot .gauge { width: 3.5rem; margin: 0; flex: none; }
+  .lot .num { min-width: 2.4rem; text-align: right; color: var(--text-secondary); }
+  #layout-note { color: var(--text-secondary); font-size: .85rem; margin: 1rem 0 0; }
   .pct-cell { display: inline-flex; align-items: center; gap: .55rem; }
   .pct-cell .num { min-width: 2.6rem; text-align: right; }
   td .gauge { width: 4.5rem; margin: 0; }
@@ -164,6 +194,16 @@
   <p id="thin" class="hidden">표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.</p>
   <div class="chart-box"><canvas id="chart-pattern"></canvas></div>
 </div>
+
+<section id="layout">
+  <h2>주차장 배치</h2>
+  <p class="caveat">방위와 거리는 나타내지 않는 <strong>구조도</strong>입니다. 터미널 소속과
+    도보·셔틀 여부, 같은 부지에 평면 주차장과 주차타워가 함께 있는 관계만 표시합니다.</p>
+  <div class="terminals" id="terminals"></div>
+  <p id="layout-note">공개 데이터에 P3 다음이 P5인 것은 <strong>P4가 상주직원 전용</strong>이라
+    집계에서 빠지기 때문입니다. 또한 T1의 P1·P2와 T2의 P1·P2는 <strong>서로 완전히 다른
+    부지</strong>입니다 — 내비게이션에 번호만 넣으면 엉뚱한 터미널로 갑니다.</p>
+</section>
 
 <section id="detail">
   <h2>구역별 상세</h2>
@@ -416,6 +456,7 @@ async function loadCurrent() {
 
   detailRows = all;
   renderDetail();
+  renderLayout();
 
   const rows = all.filter(passesFilter);
   const totals = sumByGroup(rows, []);
@@ -461,6 +502,81 @@ function applyFocus() {
     ? `${focusedFloor} 만 강조 중 — 같은 행을 다시 누르면 전체로 돌아갑니다.` : '';
 }
 
+// 배치 구조. 방위나 거리가 아니라 "확인된 관계"만 담는다 — 어느 터미널 소속인지,
+// 걸어갈 수 있는지 셔틀을 타야 하는지, 같은 부지에 평면과 타워가 함께 있는지.
+// T1 P1/P2가 동편인지 서편인지는 출처마다 달라 확인되지 않았으므로 주장하지 않는다.
+const LAYOUT = [
+  ['제1여객터미널 (T1)', [
+    ['walk', '도보 — 터미널 직결', [
+      ['단기주차장', ['T1 단기주차장지하1층', 'T1 단기주차장지하2층',
+                     'T1 단기주차장지하3층', 'T1 단기주차장지상층']],
+    ]],
+    ['shuttle', '셔틀 필요 — 장기·예약', [
+      ['P1 (평면 + 타워)', ['T1 장기 P1 주차장', 'T1 장기 P1 주차타워']],
+      ['P2 (평면 + 타워)', ['T1 장기 P2 주차장', 'T1 장기 P2 주차타워']],
+      ['P3 (평면만)', ['T1 장기 P3 주차장']],
+      ['P5 예약 전용', ['T1 P5 예약주차장']],
+    ]],
+  ]],
+  ['제2여객터미널 (T2)', [
+    ['walk', '도보 — 터미널 직결', [
+      ['단기주차장', ['T2 단기주차장지하M층', 'T2 단기주차장지상1층', 'T2 단기주차장지상2층',
+                     'T2 단기주차장지상3층', 'T2 단기주차장지상4층']],
+    ]],
+    ['shuttle', '셔틀 필요 — 장기·예약', [
+      ['장기주차장 (평면)', ['T2 장기 주차장']],
+      ['P1 장기주차타워', ['T2 P1 장기주차타워']],
+      ['P2 장기주차타워', ['T2 P2 장기주차타워']],
+      ['예약 전용', ['T2 예약 주차장']],
+    ]],
+  ]],
+];
+
+function renderLayout() {
+  const by = new Map(detailRows.map(r => [r.floor, r]));
+  const pct = r => r && r.capacity ? Math.round((r.capacity - r.available) / r.capacity * 100) : null;
+
+  document.getElementById('terminals').innerHTML = LAYOUT.map(([title, zones]) => `
+    <div class="terminal">
+      <h3>${title}</h3>
+      ${zones.map(([kind, label, sites]) => `
+        <div class="zone ${kind}">
+          <h4>${label}</h4>
+          ${sites.map(([site, floors]) => {
+            const rs = floors.map(f => by.get(f)).filter(Boolean);
+            const cap = rs.reduce((a, r) => a + r.capacity, 0);
+            const free = rs.reduce((a, r) => a + r.available, 0);
+            return `<div class="site">
+              <div class="site-head"><span>${site}</span>
+                <span class="num">${free.toLocaleString('ko-KR')} / ${cap.toLocaleString('ko-KR')}면</span></div>
+              ${floors.map(f => {
+                const u = pct(by.get(f));
+                return `<button type="button" class="lot" data-floor="${f}"
+                  ${f === focusedFloor ? 'aria-pressed="true"' : 'aria-pressed="false"'}>
+                  <span class="lot-name">${shortFloor(f).replace(site.split(' ')[0], '').trim() || shortFloor(f)}</span>
+                  <span class="gauge"><i style="width:${u ?? 0}%"></i></span>
+                  <span class="num">${u === null ? '—' : u + '%'}</span>
+                </button>`;
+              }).join('')}
+            </div>`;
+          }).join('')}
+        </div>`).join('')}
+    </div>`).join('');
+}
+
+document.getElementById('terminals').addEventListener('click', e => {
+  const floor = e.target.closest('.lot')?.dataset.floor;
+  if (!floor) return;
+  focusedFloor = focusedFloor === floor ? null : floor;
+  renderDetail();
+  renderLayout();
+  applyFocus();
+  if (focusedFloor) {
+    showTab('series');
+    document.getElementById('panel-series').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+});
+
 // 표 정렬 상태. 기본은 사용률 높은 순 — "어디가 찼나"가 먼저 알고 싶은 값이다.
 let sortKey = 'used', sortAsc = false;
 let detailRows = [];
@@ -502,6 +618,7 @@ tbody.addEventListener('click', e => {
   if (!floor) return;
   focusedFloor = focusedFloor === floor ? null : floor;
   renderDetail();
+  renderLayout();
   applyFocus();
   if (focusedFloor) {
     showTab('series');
