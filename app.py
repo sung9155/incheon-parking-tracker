@@ -110,6 +110,23 @@ async def collect_once(client: httpx.AsyncClient, con, key: str) -> int:
     return len(rows)
 
 
+def _log_collect_failure(exc: Exception) -> None:
+    # httpx 예외의 str()/repr()에는 요청 URL이 그대로 들어있고, 그 URL의 쿼리스트링에는
+    # serviceKey가 평문으로 담겨 있다 (예: "...url 'https://.../x?serviceKey=...&type=json'").
+    # httpx.HTTPError(HTTPStatusError, RequestError 등 전송/상태 오류 전부의 공통 상위 클래스)는
+    # 항상 .request를 들고 있으므로, 그 경로만 쿼리를 뗀 URL + 상태 코드로 안전하게 로깅하고
+    # log.exception()은 쓰지 않는다 — traceback의 문자열 표현에도 같은 URL이 들어가기 때문이다.
+    if isinstance(exc, httpx.HTTPError):
+        url = exc.request.url.copy_with(query=None)
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is not None:
+            log.error("collect failed: HTTP %s for %s", status, url)
+        else:
+            log.error("collect failed: %s for %s", type(exc).__name__, url)
+    else:
+        log.exception("collect failed")
+
+
 async def collect_loop(con) -> None:
     # .env에는 Encoding 키 또는 Decoding 키가 들어올 수 있다. httpx params=는 값을 다시
     # URL 인코딩하므로, Encoding 키를 그대로 넘기면 이중 인코딩되어 403이 난다. unquote는
@@ -120,9 +137,9 @@ async def collect_loop(con) -> None:
             try:
                 n = await collect_once(client, con, key)
                 log.info("collected %d rows", n)
-            except Exception:
+            except Exception as e:
                 # 재시도하지 않는다. 5분 뒤 다음 틱이 온다.
-                log.exception("collect failed")
+                _log_collect_failure(e)
             await asyncio.sleep(COLLECT_INTERVAL_SECONDS)
 
 
@@ -136,6 +153,10 @@ async def lifespan(_app: FastAPI):
     yield
     if task is not None:
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     con.close()
 
 

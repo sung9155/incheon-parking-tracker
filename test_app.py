@@ -291,3 +291,44 @@ def test_series_endpoint_windows_from_now(tmp_path, monkeypatch):
     # 버킷 경계로 반올림한 값과 비교한다.
     bucket = db.SHORT_BUCKET_SECONDS
     assert [r["ts"] for r in rows] == [((now - 600) // bucket) * bucket]
+
+
+def test_collect_failure_never_logs_the_service_key(caplog):
+    import logging
+
+    import httpx
+
+    request = httpx.Request(
+        "GET", "https://apis.data.go.kr/x",
+        params={"serviceKey": "FAKEKEY_DO_NOT_LOG", "type": "json"},
+    )
+    response = httpx.Response(403, request=request)
+    exc = httpx.HTTPStatusError("403 Forbidden", request=request, response=response)
+
+    with caplog.at_level(logging.ERROR, logger="parking"):
+        app._log_collect_failure(exc)
+
+    assert "FAKEKEY_DO_NOT_LOG" not in caplog.text
+    assert "403" in caplog.text
+
+
+def test_lifespan_cancels_collector_task_cleanly_on_shutdown(monkeypatch):
+    import time
+
+    monkeypatch.setenv("COLLECT", "1")
+    monkeypatch.setenv("SERVICE_KEY", "unused-in-this-test")
+
+    calls = []
+
+    async def fake_collect_once(client, con, key):
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr(app, "collect_once", fake_collect_once)
+
+    # 실패 시 TestClient __exit__가 (task.cancel() 뒤 await task에서) 예외를 흘려보내
+    # 테스트가 그 자체로 실패한다 — COLLECT=0인 다른 테스트들은 이 종료 경로를 건드리지 않는다.
+    with TestClient(app.app):
+        time.sleep(0.05)  # 수집 루프가 한 틱 돌 시간을 준다
+
+    assert calls  # 루프가 실제로 시작됐다 (COLLECT=1이 무시되지 않았다)

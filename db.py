@@ -62,6 +62,8 @@ ORDER BY 1, floor
 
 
 def series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
+    # 반환되는 ts는 버킷의 "바닥"이라 start보다 작을 수 있다 (예: series(400, 600) -> ts=300).
+    # off-by-one이 아니라 의도된 동작 — ts는 그 버킷을 대표하는 값이다.
     bucket = BUCKET_SECONDS if end - start > BUCKET_THRESHOLD_SECONDS else SHORT_BUCKET_SECONDS
     return con.execute(_SERIES_BUCKETED, (bucket, bucket, start, end)).fetchall()
 
