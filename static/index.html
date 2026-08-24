@@ -165,6 +165,16 @@ const passesFilter = r => filters.terminal.has(r.terminal) && filters.kind.has(r
 // 터미널은 이미 필터/색으로 구분되므로 접두사를 떼어 범례를 읽을 만하게 유지한다.
 const shortFloor = f => f.replace(/^T[12]\s*/, '');
 
+// /api/pattern은 전체 테이블을 훑는다. 필터를 바꿀 때마다 부르면 이력이 쌓인 뒤
+// 매번 초 단위로 느려지므로 페이지 수명 동안 한 번만 받아 쓴다 — 몇 달치 평균이라
+// 몇 분 낡아도 의미가 달라지지 않는다.
+let patternCache = null;
+const getPattern = () =>
+  (patternCache ??= fetch('/api/pattern').then(r => r.json()));
+
+// 표본이 이보다 적은 요일×시간 칸은 못 믿는다. 기준선에서도 비워 둔다.
+const MIN_SAMPLES = 3;
+
 // 사용률 = (전체 - 남은) / 전체. 여러 행을 합칠 때는 비율을 평균내면 안 되고
 // 면수를 합친 뒤에 나눠야 한다 — 크기가 다른 주차장이 섞이면 결과가 달라진다.
 function usedPercent(rows) {
@@ -391,9 +401,10 @@ async function loadSeries() {
   if (!from || !to || from > to) return;
   const mine = ++seriesToken;
   const q = `from=${from}&to=${to}`;
-  const [all, runs] = await Promise.all([
+  const [all, runs, pattern] = await Promise.all([
     fetch(`/api/series?${q}`).then(r => r.json()),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
+    getPattern(),
   ]);
   if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
   holidayRuns = runs;
@@ -434,6 +445,37 @@ async function loadSeries() {
     };
   });
 
+  // 평소 패턴 기준선: 같은 요일·같은 시각의 평균 사용률. 실측선이 이보다 위에
+  // 있으면 평소보다 붐빈다는 뜻이다. 개별 구역이 아니라 지금 필터에 걸린 전체의
+  // 평균이므로, 특정 주차장과 정확히 견주려면 그 주차장만 남기고 보면 된다.
+  const cells = new Map();
+  for (const r of pattern.filter(passesFilter)) {
+    const k = `${r.dow}|${r.hour}`;
+    (cells.get(k) ?? cells.set(k, []).get(k)).push(r);
+  }
+  const baseline = stamps.map(ts => {
+    const d = new Date(ts * 1000);
+    const rs = cells.get(`${d.getDay()}|${d.getHours()}`);
+    if (!rs || Math.min(...rs.map(r => r.samples)) < MIN_SAMPLES) return null;
+    return usedPercent(rs);
+  });
+
+  if (baseline.some(v => v !== null)) {
+    datasets.unshift({           // 배열 앞 = 먼저 그려져 실측선 뒤로 깔린다
+      label: '평소 (요일×시간 평균)',
+      data: baseline,
+      spanGaps: true,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      borderWidth: 1.5,
+      borderColor: cssVar('--muted'),
+      backgroundColor: cssVar('--muted'),
+      borderDash: [5, 4],
+      tension: 0,
+      pointStyle: 'line',
+    });
+  }
+
   applyChartTheme();
   seriesChart?.destroy();
   seriesChart = new Chart(document.getElementById('chart-series'), {
@@ -462,7 +504,7 @@ let patternToken = 0;
 
 async function loadPattern() {
   const token = ++patternToken;
-  const rows = await (await fetch('/api/pattern')).json();
+  const rows = await getPattern();
   if (token !== patternToken) return;
   const mine = rows.filter(passesFilter);
 
@@ -475,7 +517,7 @@ async function loadPattern() {
   }
 
   // 표본 수는 구성 구역 중 최소값으로 본다 — 하나라도 얇으면 그 칸은 못 믿는다.
-  const thin = [...cell.values()].some(rs => Math.min(...rs.map(r => r.samples)) < 3);
+  const thin = [...cell.values()].some(rs => Math.min(...rs.map(r => r.samples)) < MIN_SAMPLES);
   document.getElementById('thin').classList.toggle('hidden', !thin);
 
   const hours = [...Array(24).keys()];
