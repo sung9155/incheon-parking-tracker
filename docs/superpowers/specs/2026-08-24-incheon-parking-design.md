@@ -82,7 +82,8 @@ CREATE TABLE parking (
   저장은 불일치만 만든다.
 - **PK가 중복 방지 그 자체다.** `INSERT OR IGNORE`로 삽입하면, API의 `datetm`이 아직
   갱신되지 않았을 때 동일 행이라 조용히 무시된다. 별도 중복 체크 로직이 없다.
-- **보존 무제한.** 5분 × 9행 = 2,592행/일 ≈ 연 95만 행 ≈ 30MB. 삭제 로직을 두지 않는다.
+- **보존 무제한.** (2026-08-24 최종 리뷰 시점 정정: 구역은 9개가 아니라 실측 19개다.
+  5분 × 19행 = 5,472행/일 ≈ 연 200만 행 ≈ 100~150MB. 삭제 로직을 두지 않는다.)
 - WAL 모드를 켠다.
 
 ### 구역 그룹핑
@@ -105,11 +106,20 @@ CREATE TABLE parking (
 | `GET /api/series?from&to&group` | 실측 시계열 |
 | `GET /api/pattern?group` | 요일×시간 평균 패턴 |
 
+> **2026-08-24 최종 리뷰 시점 정정:** 위 엔드포인트 모양은 구현되지 않았다. 실제로는
+> `GET /api/series?days=`(그룹핑은 프론트가 받은 행을 합산) 하나뿐이고, `/api/current`·
+> `/api/pattern`은 쿼리 파라미터 없이 전 구역을 반환하며 그룹핑은 클라이언트에서 한다.
+
 ### 다운샘플링
 
 30일 조회 시 그룹당 8,640포인트다. 그룹 수만큼 곱하면 수만 포인트가 되어 브라우저가 버벅인다.
 **조회 기간이 3일을 초과하면 서버에서 1시간 버킷 평균**(`GROUP BY ts/3600`)으로 접고,
 그 이하는 원시 해상도를 그대로 반환한다.
+
+> **2026-08-24 최종 리뷰 시점 정정:** "그 이하는 원시 해상도"는 구현되지 않았다.
+> `db.series`는 항상 버킷팅한다 — 3일 이하는 300초(수집 주기와 동일) 버킷, 3일 초과는
+> 3600초 버킷. 수집 주기가 이미 300초라 300초 버킷은 사실상 원시 해상도와 같지만,
+> 코드 경로상 "버킷 없음"은 없다.
 
 ### 시간대 처리
 
@@ -175,7 +185,7 @@ services:
 app.py                  # FastAPI + 수집 루프 + 쿼리
 static/index.html
 test_app.py
-requirements.txt        # fastapi, uvicorn, httpx
+requirements.txt        # fastapi, uvicorn, httpx (2026-08-24 정정: pytest는 requirements-dev.txt로 분리됨)
 Dockerfile
 compose.yml
 .env.example

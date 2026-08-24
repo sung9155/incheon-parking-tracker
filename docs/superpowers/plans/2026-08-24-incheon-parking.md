@@ -62,6 +62,10 @@ httpx
 pytest
 ```
 
+> **2026-08-24 최종 리뷰 시점 정정:** 실제로는 `pytest`가 `requirements.txt`에 섞이지
+> 않고 별도 `requirements-dev.txt`(`-r requirements.txt` + `pytest`)로 분리되었다.
+> 런타임 이미지가 `pytest`를 끌고 들어가지 않게 하기 위함이다.
+
 `.gitignore`:
 
 ```
@@ -76,6 +80,7 @@ data/
 
 Run: `python -m pip install -r requirements.txt`
 Expected: fastapi, uvicorn, httpx, pytest 설치 완료
+(정정: 현재는 `pip install -r requirements-dev.txt`가 맞다)
 
 - [ ] **Step 3: 실패하는 테스트 작성**
 
@@ -1198,6 +1203,10 @@ pip install -r requirements.txt
 python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨
 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 ```
+
+> **2026-08-24 최종 리뷰 시점 정정:** 실제 README는 `pip install -r requirements-dev.txt`
+> (pytest는 별도 파일)이고, `--reload` 줄은 `COLLECT=0 SERVICE_KEY=<키> ...`로 수집기를
+> 꺼서 컨테이너와 로컬 구동이 쿼터를 이중으로 쓰지 않게 한다.
 
 `COLLECT=0`이면 수집 루프가 뜨지 않는다.
 
