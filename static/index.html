@@ -70,12 +70,12 @@
 <p id="stamp"></p>
 <div class="cards" id="cards"></div>
 
-<div class="tabs">
-  <button id="tab-series" aria-selected="true">실측 추이</button>
-  <button id="tab-pattern" aria-selected="false">요일×시간 패턴</button>
+<div class="tabs" role="tablist">
+  <button id="tab-series" role="tab" aria-selected="true" aria-controls="panel-series">실측 추이</button>
+  <button id="tab-pattern" role="tab" aria-selected="false" aria-controls="panel-pattern">요일×시간 패턴</button>
 </div>
 
-<div id="panel-series">
+<div id="panel-series" role="tabpanel" aria-labelledby="tab-series">
   <label>기간
     <select id="days">
       <option value="1">1일</option>
@@ -86,7 +86,7 @@
   <div class="chart-box"><canvas id="chart-series"></canvas></div>
 </div>
 
-<div id="panel-pattern" class="hidden">
+<div id="panel-pattern" class="hidden" role="tabpanel" aria-labelledby="tab-pattern">
   <label>그룹 <select id="group"></select></label>
   <p id="thin" class="hidden">표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.</p>
   <div class="chart-box"><canvas id="chart-pattern"></canvas></div>
@@ -189,12 +189,16 @@ async function loadCurrent() {
     .join('');
   if (rows.length) {
     document.getElementById('stamp').textContent =
-      '갱신: ' + new Date(rows[0].ts * 1000).toLocaleString('ko-KR');
+      '갱신: ' + new Date(Math.max(...rows.map(r => r.ts)) * 1000).toLocaleString('ko-KR');
   }
   const sel = document.getElementById('group');
   const groups = [...new Set(rows.map(groupKey))];
-  if (sel.options.length !== groups.length) {
+  const current = [...sel.options].map(o => o.value);
+  const changed = current.length !== groups.length || !groups.every(g => current.includes(g));
+  if (changed) {
+    const prev = sel.value;
     sel.innerHTML = groups.map(g => `<option>${g}</option>`).join('');
+    if (groups.includes(prev)) sel.value = prev; // don't silently swap the user's selection
   }
 }
 
