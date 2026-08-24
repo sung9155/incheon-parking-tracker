@@ -1,0 +1,305 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>인천공항 주차 현황</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    /* categorical palette, fixed order — never reassigned by rank (see dataviz skill) */
+    --series-1: #2a78d6; /* blue */
+    --series-2: #eb6834; /* orange */
+    --series-3: #1baf7a; /* aqua */
+    --series-4: #eda100; /* yellow */
+    --series-5: #e87ba4; /* magenta */
+    --series-6: #008300; /* green */
+    --series-7: #4a3aa7; /* violet */
+    --series-8: #e34948; /* red */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+      --series-7: #9085e9;
+      --series-8: #e66767;
+    }
+  }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 2rem auto; max-width: 60rem; padding: 0 1rem;
+    background: var(--page); color: var(--text-primary);
+  }
+  .cards { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .card {
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: .5rem; padding: 1rem; min-width: 9rem;
+  }
+  .card b { display: block; font-size: 2rem; color: var(--text-primary); }
+  .tabs { margin: 1.5rem 0 .5rem; }
+  .tabs button {
+    font: inherit; color: var(--text-primary); background: var(--surface);
+    border: 1px solid var(--border); border-radius: .375rem;
+    padding: .4rem .9rem; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { font-weight: bold; border-color: var(--series-1); }
+  .hidden { display: none; }
+  #stamp, #thin { color: var(--text-secondary); font-size: .9rem; }
+  .chart-box { position: relative; height: 22rem; margin-top: .5rem; }
+  select { font: inherit; }
+</style>
+
+<h1>인천공항 주차 현황</h1>
+<p id="stamp"></p>
+<div class="cards" id="cards"></div>
+
+<div class="tabs">
+  <button id="tab-series" aria-selected="true">실측 추이</button>
+  <button id="tab-pattern" aria-selected="false">요일×시간 패턴</button>
+</div>
+
+<div id="panel-series">
+  <label>기간
+    <select id="days">
+      <option value="1">1일</option>
+      <option value="7" selected>7일</option>
+      <option value="30">30일</option>
+    </select>
+  </label>
+  <div class="chart-box"><canvas id="chart-series"></canvas></div>
+</div>
+
+<div id="panel-pattern" class="hidden">
+  <label>그룹 <select id="group"></select></label>
+  <p id="thin" class="hidden">표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.</p>
+  <div class="chart-box"><canvas id="chart-pattern"></canvas></div>
+</div>
+
+<script>
+const groupKey = r => `${r.terminal} ${r.kind}`;
+
+// 구역별 행을 그룹 단위로 합산한다. keyFields는 그룹 외 추가 축(ts 또는 dow+hour).
+function sumByGroup(rows, keyFields) {
+  const acc = new Map();
+  for (const r of rows) {
+    const k = JSON.stringify([groupKey(r), ...keyFields.map(f => r[f])]);
+    acc.set(k, (acc.get(k) ?? 0) + r.available);
+  }
+  return acc;
+}
+
+// --- 색상: dataviz 스킬의 8슬롯 categorical 팔레트, 고정 순서 ---------------
+// 실제 그룹은 6개(T1/T2 × 단기/장기/예약)이지만 미매핑 구역이 섞이면 "기타"가
+// 늘어날 수 있으므로 하드코딩된 4/6 대신, 처음 본 그룹부터 슬롯을 채워나간다.
+// 한 번 배정된 그룹은 필터링/재조회로 목록이 바뀌어도 같은 슬롯을 유지한다
+// (recolor-on-filter 금지 — 색은 항목을 따라가야지 순번을 따라가면 안 된다).
+const PALETTE_SLOTS = 8;
+const knownGroups = ['T1 단기', 'T1 장기', 'T1 예약', 'T2 단기', 'T2 장기', 'T2 예약'];
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function seriesColor(group) {
+  let idx = knownGroups.indexOf(group);
+  if (idx === -1) {
+    knownGroups.push(group);
+    idx = knownGroups.length - 1;
+  }
+  return cssVar(`--series-${(idx % PALETTE_SLOTS) + 1}`);
+}
+
+const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+const dowColor = dow => cssVar(`--series-${(dow % PALETTE_SLOTS) + 1}`);
+
+// 수직 크로스헤어: 포인터가 가리키는 X를 정확히 짚어준다 (interaction.md).
+const crosshair = {
+  id: 'crosshair',
+  afterDraw(chart) {
+    const active = chart.tooltip?._active;
+    if (!active || !active.length) return;
+    const { ctx, chartArea: { top, bottom } } = chart;
+    const x = active[0].element.x;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = cssVar('--baseline');
+    ctx.stroke();
+    ctx.restore();
+  },
+};
+Chart.register(crosshair);
+
+function applyChartTheme() {
+  Chart.defaults.color = cssVar('--text-secondary');
+  Chart.defaults.borderColor = cssVar('--grid');
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+}
+
+function commonLineOptions(yTitle) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false }, // 한 X에서 모든 시리즈를 한 번에
+    plugins: {
+      legend: { labels: { usePointStyle: true, pointStyle: 'line', color: cssVar('--text-secondary') } },
+      tooltip: { usePointStyle: true },
+    },
+    scales: {
+      x: {
+        grid: { color: cssVar('--grid') },
+        ticks: { color: cssVar('--muted'), maxRotation: 0, autoSkip: true },
+      },
+      y: {
+        title: { display: true, text: yTitle, color: cssVar('--text-secondary') },
+        grid: { color: cssVar('--grid') },
+        ticks: {
+          color: cssVar('--muted'),
+          callback: v => v.toLocaleString('ko-KR'),
+        },
+      },
+    },
+  };
+}
+
+async function loadCurrent() {
+  const rows = await (await fetch('/api/current')).json();
+  const totals = sumByGroup(rows, []);
+  document.getElementById('cards').innerHTML = [...totals]
+    .map(([k, v]) => `<div class="card">${JSON.parse(k)[0]}<b>${Math.round(v)}</b>자리</div>`)
+    .join('');
+  if (rows.length) {
+    document.getElementById('stamp').textContent =
+      '갱신: ' + new Date(rows[0].ts * 1000).toLocaleString('ko-KR');
+  }
+  const sel = document.getElementById('group');
+  const groups = [...new Set(rows.map(groupKey))];
+  if (sel.options.length !== groups.length) {
+    sel.innerHTML = groups.map(g => `<option>${g}</option>`).join('');
+  }
+}
+
+let seriesChart, patternChart;
+
+async function loadSeries() {
+  const days = document.getElementById('days').value;
+  const rows = await (await fetch(`/api/series?days=${days}`)).json();
+  const groups = [...new Set(rows.map(groupKey))];
+  const stamps = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
+  const totals = sumByGroup(rows, ['ts']);
+
+  const datasets = groups.map(g => {
+    const color = seriesColor(g);
+    return {
+      label: g,
+      data: stamps.map(ts => totals.get(JSON.stringify([g, ts])) ?? null),
+      spanGaps: true,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      borderWidth: 2,
+      borderColor: color,
+      backgroundColor: color,
+      borderJoinStyle: 'round',
+      borderCapStyle: 'round',
+      tension: 0,
+      pointStyle: 'line',
+    };
+  });
+
+  applyChartTheme();
+  seriesChart?.destroy();
+  seriesChart = new Chart(document.getElementById('chart-series'), {
+    type: 'line',
+    data: {
+      labels: stamps.map(ts => new Date(ts * 1000).toLocaleString('ko-KR')),
+      datasets,
+    },
+    options: commonLineOptions('가용 면수'),
+  });
+}
+
+async function loadPattern() {
+  const rows = await (await fetch('/api/pattern')).json();
+  const target = document.getElementById('group').value;
+  const mine = rows.filter(r => groupKey(r) === target);
+
+  const avail = sumByGroup(mine, ['dow', 'hour']);
+
+  // 그룹 합계의 표본 수는 구성 구역 중 최소값으로 본다.
+  const samples = new Map();
+  for (const r of mine) {
+    const k = JSON.stringify([groupKey(r), r.dow, r.hour]);
+    samples.set(k, Math.min(samples.get(k) ?? Infinity, r.samples));
+  }
+  document.getElementById('thin').classList.toggle(
+    'hidden', ![...samples.values()].some(n => n < 3));
+
+  const hours = [...Array(24).keys()];
+  const datasets = DOW.map((name, dow) => {
+    const color = dowColor(dow);
+    return {
+      label: name,
+      data: hours.map(h => avail.get(JSON.stringify([target, dow, h])) ?? null),
+      spanGaps: true,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      borderWidth: 2,
+      borderColor: color,
+      backgroundColor: color,
+      borderJoinStyle: 'round',
+      borderCapStyle: 'round',
+      tension: 0,
+      pointStyle: 'line',
+    };
+  });
+
+  applyChartTheme();
+  patternChart?.destroy();
+  patternChart = new Chart(document.getElementById('chart-pattern'), {
+    type: 'line',
+    data: { labels: hours.map(h => `${h}시`), datasets },
+    options: commonLineOptions('평균 가용 면수'),
+  });
+}
+
+function showTab(which) {
+  for (const t of ['series', 'pattern']) {
+    document.getElementById(`tab-${t}`).setAttribute('aria-selected', String(t === which));
+    document.getElementById(`panel-${t}`).classList.toggle('hidden', t !== which);
+  }
+  (which === 'series' ? loadSeries : loadPattern)();
+}
+
+document.getElementById('tab-series').onclick = () => showTab('series');
+document.getElementById('tab-pattern').onclick = () => showTab('pattern');
+document.getElementById('days').onchange = loadSeries;
+document.getElementById('group').onchange = loadPattern;
+
+// 시스템 다크모드 전환 시 캔버스 색상(변수라 CSS만으로는 안 바뀜)을 다시 그린다.
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  const active = document.getElementById('tab-series').getAttribute('aria-selected') === 'true';
+  (active ? loadSeries : loadPattern)();
+});
+
+loadCurrent().then(loadSeries);
+setInterval(loadCurrent, 60_000);
+</script>
