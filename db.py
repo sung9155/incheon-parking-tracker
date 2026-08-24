@@ -112,7 +112,23 @@ def series(con: sqlite3.Connection, start: int, end: int,
     return con.execute(_SERIES_BUCKETED, (bucket, bucket, start, end)).fetchall()
 
 
-_PATTERN = """
+def pattern_sql(since: int | None, exclude_days: set[str]) -> str:
+    """요일×시간 평균 쿼리를 만든다.
+
+    `since`가 있으면 PK (ts, floor)의 범위 스캔으로 끝난다 — 없으면 전체 테이블을
+    훑으므로 이력이 몇 년 쌓이면 클릭 한 번에 초 단위로 멈춘다.
+
+    `exclude_days`는 로컬 날짜 문자열 집합이다. 황금연휴를 빼기 위한 것으로, 연휴가
+    섞이면 "평소"가 평소가 아니게 되어 기준선이 위로 끌려 올라간다.
+    """
+    where = []
+    if since is not None:
+        where.append("ts >= ?")
+    if exclude_days:
+        holes = ", ".join("?" for _ in exclude_days)
+        where.append(f"date(ts, 'unixepoch', 'localtime') NOT IN ({holes})")
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    return f"""
 SELECT CAST(strftime('%w', ts, 'unixepoch', 'localtime') AS INTEGER) AS dow,
        CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
        floor,
@@ -120,10 +136,14 @@ SELECT CAST(strftime('%w', ts, 'unixepoch', 'localtime') AS INTEGER) AS dow,
        AVG(capacity) AS capacity,
        COUNT(*) AS samples
 FROM parking
+{clause}
 GROUP BY dow, hour, floor
 ORDER BY dow, hour, floor
 """
 
 
-def pattern(con: sqlite3.Connection) -> list[sqlite3.Row]:
-    return con.execute(_PATTERN).fetchall()
+def pattern(con: sqlite3.Connection, since: int | None = None,
+            exclude_days: set[str] | None = None) -> list[sqlite3.Row]:
+    exclude_days = exclude_days or set()
+    params: list = ([since] if since is not None else []) + sorted(exclude_days)
+    return con.execute(pattern_sql(since, exclude_days), params).fetchall()

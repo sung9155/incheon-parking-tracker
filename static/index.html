@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>인천공항 주차 현황</title>
 <!-- Chart.js v4.5.1 UMD build, vendored (not CDN) — 홈랜 대시보드가 jsdelivr 접속
      불가·마이너 버전 변경에 빈 화면으로 죽지 않게 한다 -->
@@ -98,6 +99,10 @@
   .chip input { margin: 0; }
   .range { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
   .quick button { padding: .3rem .6rem; font-size: .85rem; }
+  .export-link { display: inline-block; font-size: .85rem; padding: .3rem .7rem;
+    border: 1px solid var(--border); border-radius: .375rem; background: var(--surface);
+    color: var(--text-primary); text-decoration: none; }
+  .export-link:hover { border-color: var(--series-1); }
   #holiday-jump { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0 0; }
   #holiday-jump button { font-size: .85rem; padding: .25rem .6rem; }
   #empty-note { color: var(--text-secondary); font-size: .9rem; margin: .6rem 0 0; }
@@ -158,6 +163,21 @@
   .lot .num { min-width: 2.4rem; text-align: right; color: var(--text-secondary); }
   #layout-note { color: var(--text-secondary); font-size: .85rem; margin: 1rem 0 0; }
   .num { font-variant-numeric: tabular-nums; }
+
+  /* 공항 가는 차 안에서 보는 화면이다. 좁은 폭이 기본에 가깝다. */
+  @media (max-width: 34rem) {
+    body { margin: 1rem auto; padding: 0 .75rem; }
+    h1 { font-size: 1.35rem; }
+    .cards { gap: .6rem; }
+    .card { flex: 1 1 calc(50% - .3rem); min-width: 0; padding: .7rem; }
+    .card b { font-size: 1.5rem; }
+    .toolbar { gap: .9rem; padding: .7rem; }
+    .chart-box { height: 15rem; }
+    /* T1의 P1/P2를 나란히 두면 한 칸이 너무 좁다. 세로로 쌓되 서/동 라벨은 남긴다. */
+    .band-cells { grid-template-columns: 1fr; }
+    .axis { display: none; }
+    .site.staff { display: none; }   /* 직원 전용이라 데이터도 없다 — 좁은 화면에선 뺀다 */
+  }
 </style>
 
 <h1>인천공항 주차 현황</h1>
@@ -185,6 +205,10 @@
         <button type="button" data-days="30">30일</button>
       </span>
     </div>
+  </fieldset>
+  <fieldset>
+    <legend>내보내기</legend>
+    <a id="export" class="export-link" download>CSV</a>
   </fieldset>
   <fieldset>
     <legend>단위</legend>
@@ -523,15 +547,15 @@ const LAYOUT = [
                    'T1 단기주차장지하3층', 'T1 단기주차장지상층'] }] },
       { access: 'shuttle', label: '셔틀 · 장기',
         cells: [
-          { site: 'P2 장기주차장', note: '평면 + 주차타워',
+          { site: 'P2 장기주차장', note: '서편 · 평면 + 주차타워',
             floors: ['T1 장기 P2 주차장', 'T1 장기 P2 주차타워'] },
-          { site: 'P1 장기주차장', note: '평면 + 주차타워',
+          { site: 'P1 장기주차장', note: '동편 · 평면 + 주차타워',
             floors: ['T1 장기 P1 주차장', 'T1 장기 P1 주차타워'] },
         ] },
       { access: 'shuttle', label: '셔틀 · 장기',
         cells: [
-          { site: 'P4 상주직원 주차장', note: '직원 전용 — 공개 데이터 없음', staff: true, floors: [] },
-          { site: 'P3 장기주차장', note: '평면만 · 카드 전용', floors: ['T1 장기 P3 주차장'] },
+          { site: 'P4 상주직원 주차장', note: '서편 · 직원 전용 — 공개 데이터 없음', staff: true, floors: [] },
+          { site: 'P3 장기주차장', note: '동편 · 평면만 · 카드 전용', floors: ['T1 장기 P3 주차장'] },
         ] },
       { access: 'shuttle', label: '셔틀 · 예약',
         cells: [{ site: 'P5 예약주차장', note: '가장 남쪽, 예약 전용', wide: true,
@@ -631,8 +655,11 @@ async function loadSeries() {
   const mine = ++seriesToken;
   const bucket = document.getElementById('bucket').value;
   const q = `from=${from}&to=${to}`;
+  document.getElementById('export').href = `/api/export.csv?${q}`;
+  const seriesRes = await fetch(`/api/series?${q}&bucket=${bucket}`);
+  const usedBucket = Number(seriesRes.headers.get('X-Bucket-Seconds')) || 300;
   const [all, runs, pattern] = await Promise.all([
-    fetch(`/api/series?${q}&bucket=${bucket}`).then(r => r.json()),
+    seriesRes.json(),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
     getPattern(),
   ]);
@@ -647,7 +674,16 @@ async function loadSeries() {
   // 합쳐지면 "제1주차장이 찼는지"를 볼 수 없다. 색은 그룹을 따라가고, 같은 그룹 안의
   // 구역들은 선 모양으로 나눈다 (팔레트가 8슬롯이라 19개를 색으로만 구분할 수 없다).
   const floors = [...new Set(rows.map(r => r.floor))].sort();
-  const stamps = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
+
+  // x축을 버킷 간격으로 빠짐없이 채운다. 관측된 ts만 축으로 쓰면 수집이 멈춘 구간이
+  // 축에서 통째로 빠져, 6시간 공백이 한 칸으로 압축되고 선은 매끄럽게 이어진다 —
+  // 측정하지 않은 값을 측정한 것처럼 그리는 셈이다. 공공 API는 당일치만 주므로 놓친
+  // 구간은 영원히 복구할 수 없고, 그렇다면 더더욱 비어 있다고 보여줘야 한다.
+  const present = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
+  const stamps = [];
+  if (present.length) {
+    for (let t = present[0]; t <= present[present.length - 1]; t += usedBucket) stamps.push(t);
+  }
 
   const byFloorTs = new Map();
   for (const r of rows) byFloorTs.set(`${r.floor}|${r.ts}`, r);
@@ -663,7 +699,7 @@ async function loadSeries() {
         return r ? usedPercent([r]) : null;
       }),
       $free: stamps.map(ts => byFloorTs.get(`${floor}|${ts}`)?.available ?? null),
-      spanGaps: true,
+      spanGaps: false,     // 수집이 끊긴 구간은 이어 그리지 않는다
       pointRadius: 0,
       pointHoverRadius: 4,
       borderWidth: 2,

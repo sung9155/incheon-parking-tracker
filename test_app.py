@@ -647,3 +647,128 @@ def test_series_endpoint_accepts_a_bucket_parameter(tmp_path, monkeypatch):
 
     assert len(half) == 1          # 두 관측이 같은 30분 버킷에 들어간다
     assert len(fine) == 2          # 5분 단위로는 따로 떨어진다
+
+
+# ------------------------------------------- 패턴: 조회 창 제한 + 연휴 제외
+
+def test_pattern_can_be_bounded_to_a_recent_window(tmp_path):
+    # 전체 스캔은 이력이 쌓일수록 느려진다. ts 하한을 주면 PK 범위 스캔으로 끝난다.
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    old = now - 400 * DAY
+    db.insert_rows(con, [(old, "A", 90, 100), (now, "A", 10, 100)])
+
+    rows = db.pattern(con, since=now - 180 * DAY)
+
+    assert len(rows) == 1
+    assert rows[0]["available"] == 90        # 최근 행(10대 주차)만 남는다
+
+
+def test_pattern_excludes_given_days(tmp_path):
+    # "평소"에 연휴가 섞이면 기준선이 올라간다. 연휴 날짜는 빼야 진짜 평소가 된다.
+    con = db.connect(tmp_path / "t.db")
+    normal = int(datetime(2026, 9, 17, 15, 0).timestamp())     # 목요일
+    holiday = int(datetime(2026, 9, 24, 15, 0).timestamp())    # 추석 목요일
+    db.insert_rows(con, [(normal, "A", 20, 100), (holiday, "A", 95, 100)])
+
+    both = db.pattern(con)
+    without = db.pattern(con, exclude_days={"2026-09-24"})
+
+    assert len(both) == 1 and both[0]["samples"] == 2
+    assert len(without) == 1 and without[0]["samples"] == 1
+    assert without[0]["available"] == 80        # 연휴(5자리)가 빠져 평소치만 남는다
+
+
+def test_pattern_window_uses_the_primary_key_range(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    plan = con.execute(
+        "EXPLAIN QUERY PLAN " + db.pattern_sql(since=1, exclude_days=set()), (1,)
+    ).fetchall()
+
+    assert any("USING PRIMARY KEY" in " ".join(str(c) for c in row) for row in plan), plan
+
+
+# --------------------------------------------------------------- 헬스체크
+
+def test_health_reports_ok_when_collection_is_recent(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(int(time.time()) - 60, "A", 10, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        r = client.get("/api/health")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["age_seconds"] < 300
+    assert body["floors"] == 1
+    assert body["rows"] == 1
+
+
+def test_health_reports_stale_with_a_failing_status_code(tmp_path, monkeypatch):
+    # 수집기가 죽으면 모니터링이 걸 수 있는 신호가 있어야 한다. 200을 돌려주면
+    # Uptime Kuma 같은 도구는 정상으로 읽는다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(int(time.time()) - 4 * 3600, "A", 10, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        r = client.get("/api/health")
+
+    assert r.status_code == 503
+    assert r.json()["status"] == "stale"
+
+
+def test_health_on_an_empty_database_is_stale_not_a_crash(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        r = client.get("/api/health")
+
+    assert r.status_code == 503
+    assert r.json()["last_collect"] is None
+
+
+# ------------------------------------------------------------------ CSV
+
+def test_csv_export_returns_raw_rows(tmp_path, monkeypatch):
+    # 내보내기는 버킷 평균이 아니라 원본 행이어야 한다 — 백업 용도이기 때문이다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    base = int(datetime(2026, 9, 24, 0, 5).timestamp())
+    db.insert_rows(con, [(base, "A", 10, 100), (base + 300, "A", 20, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        r = client.get("/api/export.csv?from=2026-09-24&to=2026-09-24")
+
+    assert r.status_code == 200
+    assert "text/csv" in r.headers["content-type"]
+    assert "attachment" in r.headers["content-disposition"]
+    lines = r.text.strip().splitlines()
+    assert lines[0] == "datetime,ts,floor,parked,capacity,available"
+    assert len(lines) == 3
+    assert lines[1].startswith("2026-09-24 00:05:00,")
+    assert lines[1].endswith(",A,10,100,90")
+
+
+def test_series_reports_the_bucket_it_used(tmp_path, monkeypatch):
+    # 프론트는 이 값으로 x축을 채운다 — 없으면 결측 구간을 직선으로 이어 그린다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        one_day = client.get("/api/series?from=2026-09-24&to=2026-09-24")
+        a_week = client.get("/api/series?from=2026-09-24&to=2026-09-30")
+        forced = client.get("/api/series?from=2026-09-24&to=2026-09-30&bucket=1800")
+
+    assert one_day.headers["X-Bucket-Seconds"] == "300"
+    assert a_week.headers["X-Bucket-Seconds"] == "600"     # 자동이 10분을 고른다
+    assert forced.headers["X-Bucket-Seconds"] == "1800"

@@ -1,13 +1,17 @@
 import asyncio
+import csv
+import io
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time as clock, timedelta
 from urllib.parse import unquote
 
 import holidays
 import httpx
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Response
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import db
@@ -337,7 +341,11 @@ def api_series(
     start, end = day_range_epoch(from_value, to_value)
     # 알 수 없는 값은 자동으로 흘려보낸다 — 조회 해상도 때문에 화면이 죽을 이유는 없다.
     size = int(bucket) if bucket.isdigit() and int(bucket) in db.BUCKETS else None
-    return [_with_group(r) for r in db.series(app.state.con, start, end, size)]
+    used = db.auto_bucket(start, end) if size is None else db.clamp_bucket(start, end, size)
+    rows = [_with_group(r) for r in db.series(app.state.con, start, end, size)]
+    # 프론트가 x축을 버킷 단위로 촘촘히 채우려면 실제로 쓰인 버킷 크기를 알아야 한다.
+    # 그래야 수집이 끊긴 구간이 직선으로 이어지지 않고 빈 칸으로 남는다.
+    return JSONResponse(rows, headers={"X-Bucket-Seconds": str(used)})
 
 
 @app.get("/api/holidays")
@@ -348,9 +356,92 @@ def api_holidays(
     return golden_holidays(from_value, to_value)
 
 
+# "평소"를 계산할 때 되돌아볼 기간. 3년 전 주차 패턴은 평소가 아니고, 전체 스캔은
+# 이력이 쌓일수록 느려진다. 두 문제가 같은 한 줄로 해결된다.
+PATTERN_WINDOW_DAYS = 180
+
+
+def pattern_exclusions(since: int, until: int) -> set[str]:
+    """창 안의 황금연휴 날짜들. 평균에서 빼야 '평소'가 평소가 된다."""
+    days = set()
+    first = datetime.fromtimestamp(since).date().isoformat()
+    last = datetime.fromtimestamp(until).date().isoformat()
+    for run in golden_holidays(first, last):
+        day = parse_date(run["start"])
+        stop = parse_date(run["end"])
+        while day <= stop:
+            days.add(day.isoformat())
+            day += timedelta(days=1)
+    return days
+
+
 @app.get("/api/pattern")
 def api_pattern():
-    return [_with_group(r) for r in db.pattern(app.state.con)]
+    now = int(time.time())
+    since = now - PATTERN_WINDOW_DAYS * 86400
+    rows = db.pattern(app.state.con, since=since,
+                      exclude_days=pattern_exclusions(since, now))
+    return [_with_group(r) for r in rows]
+
+
+# 마지막 수집이 이보다 오래됐으면 수집기가 죽은 것으로 본다. 수집 주기(300초)의
+# 여러 배 — 한두 번 실패로 경보가 울리면 안 되지만, 한 시간 넘게 조용하면 문제다.
+HEALTH_STALE_AFTER_SECONDS = 3600
+
+
+@app.get("/api/health")
+def api_health(response: Response):
+    """모니터링이 걸 수 있는 신호. 카드가 비는 것 말고는 수집기 사망을 알 길이 없다."""
+    row = app.state.con.execute(
+        "SELECT MAX(ts) AS last, COUNT(*) AS rows, COUNT(DISTINCT floor) AS floors FROM parking"
+    ).fetchone()
+    last, now = row["last"], int(time.time())
+    age = None if last is None else now - last
+    ok = age is not None and age <= HEALTH_STALE_AFTER_SECONDS
+    if not ok:
+        # 200을 돌려주면 Uptime Kuma 같은 도구가 정상으로 읽는다.
+        response.status_code = 503
+    return {
+        "status": "ok" if ok else "stale",
+        "last_collect": None if last is None else datetime.fromtimestamp(last).isoformat(),
+        "age_seconds": age,
+        "rows": row["rows"],
+        "floors": row["floors"],
+        # TZ가 빠지면 저장되는 모든 ts가 밀린다. 여기서 바로 확인할 수 있게 노출한다.
+        "localtime_epoch_zero": app.state.con.execute(
+            "SELECT datetime(0, 'unixepoch', 'localtime')"
+        ).fetchone()[0],
+    }
+
+
+@app.get("/api/export.csv")
+def api_export(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+):
+    """구간의 원본 행을 CSV로. 버킷 평균이 아니라 원본이어야 백업이 된다.
+
+    공공 API가 당일치만 주므로 이 DB가 사라지면 이력은 복구할 방법이 없다.
+    """
+    start, end = day_range_epoch(from_value, to_value)
+    buf = io.StringIO()
+    out = csv.writer(buf, lineterminator=chr(10))
+    out.writerow(["datetime", "ts", "floor", "parked", "capacity", "available"])
+    for r in app.state.con.execute(
+        "SELECT ts, floor, parked, capacity FROM parking "
+        "WHERE ts BETWEEN ? AND ? ORDER BY ts, floor", (start, end)
+    ):
+        out.writerow([
+            datetime.fromtimestamp(r["ts"]).isoformat(sep=" "),
+            r["ts"], r["floor"], r["parked"], r["capacity"],
+            r["capacity"] - r["parked"],
+        ])
+    name = f"incheon-parking_{from_value}_{to_value}.csv"
+    return Response(
+        buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
