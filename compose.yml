@@ -3,7 +3,10 @@ services:
     build: .
     restart: unless-stopped
     ports: ["8000:8000"]
-    volumes: ["./data:/data"]
+    # Portainer Git 스택은 상대 경로를 Portainer 내부 클론 디렉터리 기준으로 잡는다.
+    # 거기 DB를 두면 스택을 지우거나 재클론할 때 누적 이력이 통째로 날아간다.
+    # DATA_DIR에 절대 경로를 주면 그걸 쓰고, 없으면 CLI 기본값인 ./data를 쓴다.
+    volumes: ["${DATA_DIR:-./data}:/data"]
     environment:
       TZ: Asia/Seoul
       SERVICE_KEY: ${SERVICE_KEY:?SERVICE_KEY is required}

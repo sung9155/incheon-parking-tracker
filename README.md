@@ -26,7 +26,35 @@ docker compose up -d --build
 
 `http://<미니PC주소>:8000` 접속.
 
-`./data`는 로컬 디스크여야 한다. NAS나 네트워크 마운트에 두면 SQLite WAL이 깨진다.
+데이터 디렉터리는 로컬 디스크여야 한다. NAS나 네트워크 마운트에 두면 SQLite WAL이 깨진다.
+
+## Portainer로 배포
+
+Portainer는 **Stacks → Add stack → Repository**를 쓴다. 웹 에디터에 compose 내용을
+붙여넣는 방식은 이 프로젝트에서 동작하지 않는다 — `build:`에 필요한 소스 컨텍스트가
+없기 때문이다.
+
+1. 이 저장소를 원격에 푸시한다 (비공개 저장소로 충분하다).
+2. Stacks → Add stack → **Repository**
+   - Repository URL: 저장소 주소
+   - Compose path: `compose.yml`
+   - 비공개면 Authentication에 토큰을 넣는다
+3. **Environment variables**에 두 개를 넣는다:
+
+   | 이름 | 값 |
+   |---|---|
+   | `SERVICE_KEY` | 공공데이터포털 인증키 |
+   | `DATA_DIR` | `/srv/parking/data` 같은 **절대 경로** |
+
+   `.env` 파일은 만들지 않아도 된다. Portainer가 넣어주는 값이 그대로 치환된다.
+
+4. Deploy.
+
+`DATA_DIR`을 반드시 절대 경로로 넣어야 한다. 비워두면 기본값 `./data`가 쓰이는데,
+Portainer는 이를 자기 내부 클론 디렉터리(`/data/compose/<id>/data`) 기준으로 해석한다.
+스택을 삭제하거나 재클론하면 **몇 달치 수집 이력이 함께 사라진다.**
+
+코드를 고친 뒤에는 push하고 스택 화면에서 **Pull and redeploy**를 누르면 된다.
 
 ## 개발
 
