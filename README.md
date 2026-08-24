@@ -32,8 +32,8 @@ docker compose up -d --build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (25개 테스트)
-SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (29개 테스트)
+COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
 `COLLECT=0`이면 수집 루프가 뜨지 않는다.

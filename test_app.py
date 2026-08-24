@@ -383,11 +383,23 @@ def test_collect_failure_never_raises_or_leaks_key_on_awkward_exceptions(caplog)
         assert "FAKEKEY_DO_NOT_LOG" not in caplog.text
 
 
-def test_lifespan_cancels_collector_task_cleanly_on_shutdown(monkeypatch):
+def test_result_msg_extracts_message_or_falls_back_safely():
+    # 일일 쿼터 소진 시 data.go.kr은 HTTP 200 + 에러 바디를 주고, resultMsg에 원인이
+    # 담긴다. 그 필드가 없거나 payload 형태가 예상과 다를 때도 절대 예외를 던지지 않는다
+    # (collect_once의 except 경로 안에서 호출되므로).
+    quota_exceeded = {"response": {"header": {"resultMsg": "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"}}}
+    assert app._result_msg(quota_exceeded) == "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"
+    assert app._result_msg({}) == "no resultMsg"
+    assert app._result_msg(None) == "no resultMsg"
+    assert app._result_msg("not a dict") == "no resultMsg"
+
+
+def test_lifespan_cancels_collector_task_cleanly_on_shutdown(tmp_path, monkeypatch):
     import time
 
     monkeypatch.setenv("COLLECT", "1")
     monkeypatch.setenv("SERVICE_KEY", "unused-in-this-test")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
 
     calls = []
 

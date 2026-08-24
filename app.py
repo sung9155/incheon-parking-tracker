@@ -107,15 +107,36 @@ COLLECT_INTERVAL_SECONDS = 300
 async def collect_once(client: httpx.AsyncClient, con, key: str) -> int:
     r = await client.get(
         API_URL,
+        # numOfRows=100: 오늘 기준 19개 구역 전부가 한 호출에 온다. 공항이 100개를
+        # 넘어서면 조용히 잘리므로, 그때는 이 값을 올려야 한다.
         params={"serviceKey": key, "numOfRows": 100, "pageNo": 1, "type": "json"},
         timeout=15,
     )
     r.raise_for_status()
-    rows = parse_rows(r.json())
+    payload = None
+    try:
+        payload = r.json()
+        rows = parse_rows(payload)
+    except (KeyError, ValueError, TypeError):
+        # 일일 쿼터 소진 시 data.go.kr은 HTTP 200 + 에러 바디를 준다 — 그러면 여기서
+        # KeyError나 JSONDecodeError가 난다. resultMsg를 남겨 원인을 알 수 있게 한다.
+        log.error("collect failed to parse response: %s", _result_msg(payload))
+        raise
     for _, floor, _, _ in rows:
         group_of(floor)          # 미매핑 구역 경고를 남긴다
     db.insert_rows(con, rows)
     return len(rows)
+
+
+def _result_msg(payload: dict) -> str:
+    # 일일 쿼터 소진 시 data.go.kr은 HTTP 200 + 에러 바디를 준다. 여기서 흔히 파싱이
+    # 실패하는데, 그 원인 메시지(resultMsg)를 남겨 "쿼터 소진"과 "응답 형식 변경"을
+    # 구분할 수 있게 한다. payload 형태가 예상과 다를 수 있으므로 이 함수 자체는 절대
+    # 예외를 던지지 않는다 — collect_once의 except 경로 안에서 호출되기 때문이다.
+    try:
+        return payload["response"]["header"]["resultMsg"]
+    except Exception:
+        return "no resultMsg"
 
 
 def _log_collect_failure(exc: Exception) -> None:
@@ -144,11 +165,7 @@ def _log_collect_failure(exc: Exception) -> None:
         log.error("collect failed: %s", type(exc).__name__)
 
 
-async def collect_loop(con) -> None:
-    # .env에는 Encoding 키 또는 Decoding 키가 들어올 수 있다. httpx params=는 값을 다시
-    # URL 인코딩하므로, Encoding 키를 그대로 넘기면 이중 인코딩되어 403이 난다. unquote는
-    # Decoding 키(base64, %가 없음)에는 no-op이고, Encoding 키는 되돌려 올바르게 인코딩되게 한다.
-    key = unquote(os.environ["SERVICE_KEY"])
+async def collect_loop(con, key: str) -> None:
     async with httpx.AsyncClient() as client:
         while True:
             try:
@@ -166,7 +183,16 @@ async def lifespan(_app: FastAPI):
     _app.state.con = con
     task = None
     if os.environ.get("COLLECT", "1") == "1":
-        task = asyncio.create_task(collect_loop(con))
+        # 여기서 읽는다(수집 루프 안이 아니라) — 키가 없으면 컨테이너가 바로 죽어
+        # restart: unless-stopped로 눈에 띄게 한다. 루프 안에서 읽으면 수집 태스크만
+        # 조용히 죽고 웹 UI는 계속 200을 반환해 아무도 못 알아챈다.
+        #
+        # .env에는 Encoding 키 또는 Decoding 키가 들어올 수 있다. httpx params=는 값을
+        # 다시 URL 인코딩하므로, Encoding 키를 그대로 넘기면 이중 인코딩되어 403이 난다.
+        # unquote는 Decoding 키(base64, %가 없음)에는 no-op이고, Encoding 키는 되돌려
+        # 올바르게 인코딩되게 한다.
+        key = unquote(os.environ["SERVICE_KEY"])
+        task = asyncio.create_task(collect_loop(con, key))
     yield
     if task is not None:
         task.cancel()
