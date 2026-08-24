@@ -69,3 +69,19 @@ def series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
             _SERIES_BUCKETED, (BUCKET_SECONDS, BUCKET_SECONDS, start, end)
         ).fetchall()
     return con.execute(_SERIES_RAW, (start, end)).fetchall()
+
+
+_PATTERN = """
+SELECT CAST(strftime('%w', ts, 'unixepoch', 'localtime') AS INTEGER) AS dow,
+       CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+       floor,
+       AVG(capacity - parked) AS available,
+       COUNT(*) AS samples
+FROM parking
+GROUP BY dow, hour, floor
+ORDER BY dow, hour, floor
+"""
+
+
+def pattern(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    return con.execute(_PATTERN).fetchall()

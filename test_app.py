@@ -134,3 +134,32 @@ def test_series_separates_floors(tmp_path):
     rows = db.series(con, 0, DAY)
 
     assert sorted((r["floor"], r["available"]) for r in rows) == [("A", 90), ("B", 80)]
+
+
+def test_pattern_groups_by_local_weekday_and_hour(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    ts = int(datetime(2026, 8, 24, 15, 0).timestamp())   # 로컬 시간대 기준 15시
+    db.insert_rows(con, [(ts, "A", 40, 100), (ts + 300, "A", 60, 100)])
+
+    rows = db.pattern(con)
+
+    assert len(rows) == 1
+    row = rows[0]
+    local = datetime.fromtimestamp(ts)
+    assert row["hour"] == local.hour
+    assert row["dow"] == int(local.strftime("%w"))
+    assert row["available"] == 50.0
+    assert row["samples"] == 2
+
+
+def test_pattern_separates_distinct_hours(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    base = int(datetime(2026, 8, 24, 15, 0).timestamp())
+    db.insert_rows(con, [(base, "A", 40, 100), (base + 2 * HOUR, "A", 10, 100)])
+
+    rows = db.pattern(con)
+
+    assert len(rows) == 2
+    assert sorted(r["hour"] for r in rows) == sorted(
+        [datetime.fromtimestamp(base).hour, datetime.fromtimestamp(base + 2 * HOUR).hour]
+    )
