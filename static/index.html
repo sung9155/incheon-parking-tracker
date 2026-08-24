@@ -95,7 +95,8 @@
   #empty-note { color: var(--text-secondary); font-size: .9rem; margin: .6rem 0 0; }
 
   #detail { margin: 2rem 0 3rem; }
-  #detail h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  #detail h2 { font-size: 1rem; margin: 0 0 .25rem; }
+  #detail-hint { color: var(--text-secondary); font-size: .85rem; margin: 0 0 .6rem; }
   .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: .5rem; }
   table { border-collapse: collapse; width: 100%; font-size: .9rem; }
   th, td { padding: .5rem .75rem; text-align: right; white-space: nowrap; }
@@ -108,6 +109,11 @@
   thead th[aria-sort]::after { content: ' ▾'; font-size: .75em; }
   thead th[aria-sort="ascending"]::after { content: ' ▴'; }
   tbody tr + tr td { border-top: 1px solid var(--border); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--series-1) 8%, transparent); }
+  tbody tr[aria-selected="true"] td { background: color-mix(in srgb, var(--series-1) 16%, transparent); }
+  tbody tr[aria-selected="true"] td:first-child { font-weight: 700; }
+  #focus-note { color: var(--text-secondary); font-size: .85rem; margin: .5rem 0 0; }
   .pct-cell { display: inline-flex; align-items: center; gap: .55rem; }
   .pct-cell .num { min-width: 2.6rem; text-align: right; }
   td .gauge { width: 4.5rem; margin: 0; }
@@ -151,6 +157,7 @@
   <div id="holiday-jump"></div>
   <p id="empty-note" class="hidden">이 기간에는 수집된 데이터가 없습니다.</p>
   <div class="chart-box"><canvas id="chart-series"></canvas></div>
+  <p id="focus-note"></p>
 </div>
 
 <div id="panel-pattern" class="hidden" role="tabpanel" aria-labelledby="tab-pattern">
@@ -160,6 +167,7 @@
 
 <section id="detail">
   <h2>구역별 상세</h2>
+  <p id="detail-hint">행을 누르면 그 주차장의 추세만 차트에 강조됩니다.</p>
   <div class="table-wrap">
     <table>
       <thead>
@@ -431,6 +439,28 @@ async function loadCurrent() {
   }
 }
 
+// 표에서 고른 구역 하나를 차트에서 도드라지게 한다. 19개 선을 한꺼번에 보면 아무것도
+// 안 읽히므로, 표가 "어디가 찼나"에 답하고 차트는 고른 하나의 추세만 보여준다.
+let focusedFloor = null, hoverFloor = null;
+
+const fade = (hex, a) => {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+};
+
+function applyFocus() {
+  if (!seriesChart) return;
+  const target = hoverFloor ?? focusedFloor;
+  for (const d of seriesChart.data.datasets) {
+    const lit = !target || d.$floor === target;
+    d.borderColor = lit ? d.$color : fade(d.$color, d.$baseline ? 0.3 : 0.12);
+    d.borderWidth = !target ? (d.$baseline ? 1.5 : 2) : (lit ? 3 : 1);
+  }
+  seriesChart.update('none');
+  document.getElementById('focus-note').textContent = focusedFloor
+    ? `${focusedFloor} 만 강조 중 — 같은 행을 다시 누르면 전체로 돌아갑니다.` : '';
+}
+
 // 표 정렬 상태. 기본은 사용률 높은 순 — "어디가 찼나"가 먼저 알고 싶은 값이다.
 let sortKey = 'used', sortAsc = false;
 let detailRows = [];
@@ -445,8 +475,11 @@ function renderDetail() {
     return (typeof x === 'string' ? x.localeCompare(y, 'ko') : x - y) * dir;
   });
 
+  // 걸러져 사라진 구역이 계속 강조돼 있으면 안 된다.
+  if (focusedFloor && !rows.some(r => r.floor === focusedFloor)) focusedFloor = null;
+
   document.getElementById('detail-rows').innerHTML = rows.map(r => `
-    <tr>
+    <tr data-floor="${r.floor}"${r.floor === focusedFloor ? ' aria-selected="true"' : ''}>
       <td>${r.floor}</td>
       <td>${r.terminal}</td>
       <td>${r.kind}</td>
@@ -461,6 +494,29 @@ function renderDetail() {
     else th.removeAttribute('aria-sort');
   }
 }
+
+const tbody = document.getElementById('detail-rows');
+
+tbody.addEventListener('click', e => {
+  const floor = e.target.closest('tr')?.dataset.floor;
+  if (!floor) return;
+  focusedFloor = focusedFloor === floor ? null : floor;
+  renderDetail();
+  applyFocus();
+  if (focusedFloor) {
+    showTab('series');
+    document.getElementById('panel-series').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+});
+
+tbody.addEventListener('mouseover', e => {
+  const floor = e.target.closest('tr')?.dataset.floor ?? null;
+  if (floor !== hoverFloor) { hoverFloor = floor; applyFocus(); }
+});
+
+tbody.addEventListener('mouseleave', () => {
+  if (hoverFloor !== null) { hoverFloor = null; applyFocus(); }
+});
 
 document.querySelector('thead').addEventListener('click', e => {
   const key = e.target.closest('th')?.dataset.sort;
@@ -505,6 +561,8 @@ async function loadSeries() {
   const datasets = floors.map(floor => {
     const color = floorColor(floor);
     return {
+      $floor: floor,
+      $color: color,
       label: shortFloor(floor),
       data: stamps.map(ts => {
         const r = byFloorTs.get(`${floor}|${ts}`);
@@ -542,6 +600,9 @@ async function loadSeries() {
 
   if (baseline.some(v => v !== null)) {
     datasets.unshift({           // 배열 앞 = 먼저 그려져 실측선 뒤로 깔린다
+      $floor: null,
+      $color: cssVar('--muted'),
+      $baseline: true,
       label: '평소 (요일×시간 평균)',
       data: baseline,
       spanGaps: true,
@@ -572,6 +633,7 @@ async function loadSeries() {
   });
   seriesChart.$stamps = stamps;   // 음영 플러그인이 라벨 인덱스를 찾는 데 쓴다
   seriesChart.update();
+  applyFocus();                   // 다시 그려도 고른 구역은 계속 강조된 채로 남는다
 }
 
 function renderHolidayJump(runs) {
