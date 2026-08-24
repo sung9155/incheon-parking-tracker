@@ -4,5 +4,4 @@ data/
 __pycache__/
 .pytest_cache/
 docs/
-scripts/
 test_app.py
