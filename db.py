@@ -32,3 +32,13 @@ def insert_rows(con: sqlite3.Connection, rows: Iterable[tuple[int, str, int, int
         rows,
     )
     con.commit()
+
+
+def latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT ts, floor, parked, capacity, capacity - parked AS available
+        FROM parking
+        WHERE ts = (SELECT MAX(ts) FROM parking)
+        """
+    ).fetchall()

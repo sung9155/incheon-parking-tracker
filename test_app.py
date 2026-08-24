@@ -66,3 +66,23 @@ def test_parse_rows_handles_item_wrapper():
     assert len(rows) == 1
     assert rows[0][1] == "장기주차장 P1"
     assert rows[0][2:] == (10, 20)
+
+
+def test_latest_returns_only_most_recent_snapshot(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [
+        (1000, "A", 10, 100),
+        (1000, "B", 20, 200),
+        (1300, "A", 30, 100),
+        (1300, "B", 40, 200),
+    ])
+
+    rows = db.latest(con)
+
+    assert {r["ts"] for r in rows} == {1300}
+    assert sorted((r["floor"], r["available"]) for r in rows) == [("A", 70), ("B", 160)]
+
+
+def test_latest_on_empty_db_returns_empty(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    assert db.latest(con) == []
