@@ -63,7 +63,7 @@ def parse_rows(payload: dict) -> list[tuple[int, str, int, int]]:
     return [(ts, floor, parked, capacity) for _, floor, parked, capacity in parsed]
 
 
-# scripts/probe.py 출력(실제 API 호출, 2026-08-24)으로 확정한 floor 원문 → (터미널, 유형).
+# 실제 API 호출(2026-08-24)로 확정한 floor 원문 → (터미널, 유형).
 # 유형은 단기/장기 외에 예약주차장(예약)이 있다 — 데이터셋 설명에는 없던 실제 3번째 유형.
 FLOOR_GROUPS: dict[str, tuple[str, str]] = {
     "T1 단기주차장지하1층": ("T1", "단기"),
@@ -191,7 +191,10 @@ async def lifespan(_app: FastAPI):
         # 다시 URL 인코딩하므로, Encoding 키를 그대로 넘기면 이중 인코딩되어 403이 난다.
         # unquote는 Decoding 키(base64, %가 없음)에는 no-op이고, Encoding 키는 되돌려
         # 올바르게 인코딩되게 한다.
-        key = unquote(os.environ["SERVICE_KEY"])
+        raw_key = os.environ.get("SERVICE_KEY", "")
+        if not raw_key:
+            raise RuntimeError("SERVICE_KEY is required (set it in .env)")
+        key = unquote(raw_key)
         task = asyncio.create_task(collect_loop(con, key))
     yield
     if task is not None:

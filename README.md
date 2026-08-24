@@ -32,7 +32,7 @@ docker compose up -d --build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (29개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (30개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
@@ -40,14 +40,19 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 
 ## 운영
 
-컨테이너의 요일×시간 패턴은 SQLite의 `strftime(..., 'localtime')`을 거쳐 정산되므로, 시간대가
-정확해야 한다. 설정 후 다음을 실행해서 `1970-01-01 09:00:00` (KST)가 나오는지 확인하라.
+시간대가 틀리면 요일×시간 패턴만 어긋나는 게 아니다. `parse_datetm`이 naive local time으로
+`ts`를 만들기 때문에, `TZ`가 빠지거나 `tzdata` 패키지가 없으면 저장되는 **모든** 타임스탬프가
+9시간 밀린다. 그러면 `db.latest`의 신선도 창(최근 1시간)에 걸리는 행이 하나도 없게 되어
+`/api/current`가 빈 배열을 반환하고, **카드도 두 차트도 전부 빈 화면**이 된다. 대시보드가
+통째로 비어 있다면 먼저 이 문제를 의심하라.
+
+설정 후 다음을 실행해서 `1970-01-01 09:00:00` (KST)가 나오는지 확인하라.
 
 ```bash
 docker compose exec parking python -c "import sqlite3; print(sqlite3.connect(':memory:').execute(\"SELECT datetime(0,'unixepoch','localtime')\").fetchone()[0])"
 ```
 
-`00:00:00`이 나오면 `tzdata` 패키지가 없어서 UTC로 고정되었다. 이 경우 요일×시간 패턴이 9시간 밀린다.
+`00:00:00`이 나오면 `tzdata` 패키지가 없어서 UTC로 고정된 것이다.
 
 ## 문서
 

@@ -6,5 +6,5 @@ services:
     volumes: ["./data:/data"]
     environment:
       TZ: Asia/Seoul
-      SERVICE_KEY: ${SERVICE_KEY}
+      SERVICE_KEY: ${SERVICE_KEY:?SERVICE_KEY is required}
       DB_PATH: /data/parking.db

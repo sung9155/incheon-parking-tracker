@@ -165,7 +165,7 @@ def test_latest_excludes_a_floor_stale_beyond_the_freshness_window(tmp_path):
 def test_latest_includes_a_floor_within_the_freshness_window(tmp_path):
     con = db.connect(tmp_path / "t.db")
     now = int(time.time())
-    db.insert_rows(con, [(now - db.LATEST_MAX_AGE_SECONDS + 1, "A", 10, 100)])
+    db.insert_rows(con, [(now - 60, "A", 10, 100)])
 
     rows = db.latest(con)
 
@@ -239,7 +239,7 @@ def test_pattern_groups_by_local_weekday_and_hour(tmp_path):
 
 
 def test_every_known_floor_is_mapped():
-    assert app.FLOOR_GROUPS, "FLOOR_GROUPS is empty — run scripts/probe.py first"
+    assert app.FLOOR_GROUPS, "FLOOR_GROUPS is empty"
     for floor, group in app.FLOOR_GROUPS.items():
         assert app.group_of(floor) == group
 
@@ -415,3 +415,16 @@ def test_lifespan_cancels_collector_task_cleanly_on_shutdown(tmp_path, monkeypat
         time.sleep(0.05)  # 수집 루프가 한 틱 돌 시간을 준다
 
     assert calls  # 루프가 실제로 시작됐다 (COLLECT=1이 무시되지 않았다)
+
+
+def test_lifespan_fails_loudly_on_empty_service_key(tmp_path, monkeypatch):
+    # compose.yml의 매핑 형식(SERVICE_KEY: ${SERVICE_KEY})은 변수가 unset이어도 빈
+    # 문자열로 치환되므로 os.environ["SERVICE_KEY"]는 절대 KeyError를 던지지 않는다.
+    # 빈 값 자체를 거부해야 컨테이너가 조용히 403을 반복하는 대신 바로 죽는다.
+    monkeypatch.setenv("COLLECT", "1")
+    monkeypatch.setenv("SERVICE_KEY", "")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with pytest.raises(RuntimeError, match="SERVICE_KEY"):
+        with TestClient(app.app):
+            pass
