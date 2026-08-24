@@ -41,12 +41,17 @@ Portainer는 **Stacks → Add stack → Repository**를 쓴다. 웹 에디터에
    - 비공개면 Authentication에 토큰을 넣는다
 3. **Environment variables**에 두 개를 넣는다:
 
-   | 이름 | 값 |
-   |---|---|
-   | `SERVICE_KEY` | 공공데이터포털 인증키 |
-   | `DATA_DIR` | `/srv/parking/data` 같은 **절대 경로** |
+   | 이름 | 값 | 필수 |
+   |---|---|---|
+   | `SERVICE_KEY` | 공공데이터포털 인증키 | 예 |
+   | `DATA_DIR` | `/srv/parking/data` 같은 **절대 경로** | 예 |
+   | `HOST_PORT` | 8000이 이미 쓰이면 다른 포트 (기본 8000) | 아니오 |
 
    `.env` 파일은 만들지 않아도 된다. Portainer가 넣어주는 값이 그대로 치환된다.
+
+   `port is already allocated`로 배포가 실패하면 호스트의 그 포트를 다른 것이 쓰고 있다는
+   뜻이다. `HOST_PORT`만 바꾸면 된다 — 컨테이너 안은 계속 8000이므로 앱 설정은 그대로다.
+   무엇이 점유 중인지는 `sudo ss -lptn 'sport = :8000'`으로 확인한다.
 
 4. Deploy.
 
