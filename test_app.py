@@ -541,3 +541,25 @@ def test_golden_holidays_ignores_constitution_day_substitute():
     runs = app.golden_holidays("2027-07-01", "2027-07-31")
 
     assert runs == []
+
+
+def test_series_reports_capacity_so_occupancy_can_be_computed(tmp_path):
+    # 사용률은 (capacity - available) / capacity 로 계산한다. capacity가 없으면
+    # 프론트에서 사용률을 낼 방법이 없다. 층별 capacity는 상수이므로 AVG는 그 값 그대로다.
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(0, "A", 40, 100), (300, "A", 60, 100)])
+
+    rows = db.series(con, 0, DAY)
+
+    assert [r["capacity"] for r in rows] == [100, 100]
+    assert [r["available"] for r in rows] == [60, 40]
+
+
+def test_pattern_reports_capacity_too(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    ts = int(datetime(2026, 8, 24, 15, 0).timestamp())
+    db.insert_rows(con, [(ts, "A", 40, 100)])
+
+    rows = db.pattern(con)
+
+    assert rows[0]["capacity"] == 100

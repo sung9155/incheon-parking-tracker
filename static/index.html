@@ -161,6 +161,18 @@ function buildChips(containerId, values, axis, onChange) {
 
 const passesFilter = r => filters.terminal.has(r.terminal) && filters.kind.has(r.kind);
 
+// 층 이름에서 화면용 짧은 라벨을 만든다. "T1 장기 P1 주차장" -> "장기 P1 주차장".
+// 터미널은 이미 필터/색으로 구분되므로 접두사를 떼어 범례를 읽을 만하게 유지한다.
+const shortFloor = f => f.replace(/^T[12]\s*/, '');
+
+// 사용률 = (전체 - 남은) / 전체. 여러 행을 합칠 때는 비율을 평균내면 안 되고
+// 면수를 합친 뒤에 나눠야 한다 — 크기가 다른 주차장이 섞이면 결과가 달라진다.
+function usedPercent(rows) {
+  let cap = 0, free = 0;
+  for (const r of rows) { cap += r.capacity; free += r.available; }
+  return cap ? (cap - free) / cap * 100 : null;
+}
+
 // --- 날짜 -----------------------------------------------------------------
 // input[type=date]는 로컬 기준 YYYY-MM-DD를 주고받는다. 서버도 같은 문자열을
 // 컨테이너 로컬 자정으로 해석하므로 변환이 필요 없다.
@@ -236,6 +248,22 @@ function sumByGroup(rows, keyFields, field = 'available') {
 // 한 번 배정된 그룹은 필터링/재조회로 목록이 바뀌어도 같은 슬롯을 유지한다
 // (recolor-on-filter 금지 — 색은 항목을 따라가야지 순번을 따라가면 안 된다).
 const PALETTE_SLOTS = 8;
+// 구역이 8개(팔레트 슬롯 수)를 넘어가면 색이 돌아온다. 그때 선 모양이 두 번째
+// 구분 채널이 되어 같은 색끼리도 갈린다.
+const DASHES = [[], [6, 3], [2, 3], [10, 3, 2, 3]];
+
+// 구역별 색. 정렬된 전체 목록에서의 위치로 슬롯을 정하므로, 필터를 걸어 일부만
+// 남아도 각 구역의 색이 그대로 유지된다 (recolor-on-filter 금지).
+const knownFloors = [];
+
+function floorSlot(floor) {
+  let i = knownFloors.indexOf(floor);
+  if (i === -1) { knownFloors.push(floor); i = knownFloors.length - 1; }
+  return i;
+}
+
+const floorColor = f => cssVar(`--series-${(floorSlot(f) % PALETTE_SLOTS) + 1}`);
+const floorDash = f => DASHES[Math.floor(floorSlot(f) / PALETTE_SLOTS) % DASHES.length];
 const knownGroups = ['T1 단기', 'T1 장기', 'T1 예약', 'T2 단기', 'T2 장기', 'T2 예약'];
 
 function cssVar(name) {
@@ -280,6 +308,24 @@ function applyChartTheme() {
   Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
 }
 
+function occupancyOptions(tooltipExtra) {
+  // 눈금마다 %가 붙으므로 축 제목은 중복이다. 세로로 눌려 읽히지도 않아 뺀다.
+  const o = commonLineOptions('');
+  o.scales.y.title.display = false;
+  o.scales.y.min = 0;
+  o.scales.y.max = 100;
+  o.scales.y.ticks.callback = v => `${v}%`;
+  o.plugins.tooltip.callbacks = {
+    label: ctx => {
+      const pct = ctx.parsed.y;
+      if (pct === null) return null;
+      const extra = tooltipExtra?.(ctx);
+      return `${ctx.dataset.label}: ${pct.toFixed(1)}%` + (extra ? ` (${extra})` : '');
+    },
+  };
+  return o;
+}
+
 function commonLineOptions(yTitle) {
   return {
     responsive: true,
@@ -308,17 +354,23 @@ function commonLineOptions(yTitle) {
 
 async function loadCurrent() {
   const all = await (await fetch('/api/current')).json();
+  // 필터와 무관하게 전체 목록으로 슬롯을 먼저 확정해 둔다 — 그래야 필터를 바꿔도
+  // 각 구역의 색이 튀지 않는다.
+  [...new Set(all.map(r => r.floor))].sort().forEach(floorSlot);
+
   const rows = all.filter(passesFilter);
   const totals = sumByGroup(rows, []);
   const caps = sumByGroup(rows, [], 'capacity');
   document.getElementById('cards').innerHTML = [...totals]
     .map(([k, free]) => {
       const cap = caps.get(k) ?? 0;
-      const pct = cap ? Math.round(free / cap * 100) : 0;
+      // 게이지는 "찬 정도"를 칠한다 — 가득 찬 주차장일수록 바가 길다. 큰 숫자는
+      // 남은 자리이므로, 바 옆 퍼센트도 같은 축(사용률)으로 맞춰 서로 어긋나지 않게 한다.
+      const usedPct = cap ? Math.round((cap - free) / cap * 100) : 0;
       return `<div class="card">${JSON.parse(k)[0]}
         <b>${Math.round(free).toLocaleString('ko-KR')}</b>
-        <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 여유 ${pct}%</span>
-        <span class="gauge"><i style="width:${pct}%"></i></span>
+        <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 사용 ${usedPct}%</span>
+        <span class="gauge" role="img" aria-label="사용률 ${usedPct}%"><i style="width:${usedPct}%"></i></span>
       </div>`;
     }).join('');
   // 필터와 무관하게 전체 응답 기준으로 찍는다 — 필터를 다 꺼도 수집 시각은 유효하다.
@@ -330,34 +382,51 @@ async function loadCurrent() {
 
 let seriesChart, patternChart;
 
+// 필터를 빠르게 여러 번 누르면 요청이 겹친다. 토큰을 두어 늦게 도착한 옛 응답이
+// 최신 화면을 덮어쓰지 못하게 한다.
+let seriesToken = 0;
+
 async function loadSeries() {
   const { from, to } = currentRange();
   if (!from || !to || from > to) return;
+  const mine = ++seriesToken;
   const q = `from=${from}&to=${to}`;
   const [all, runs] = await Promise.all([
     fetch(`/api/series?${q}`).then(r => r.json()),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
   ]);
+  if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
   holidayRuns = runs;
   renderHolidayJump(runs);
 
   const rows = all.filter(passesFilter);
   document.getElementById('empty-note').classList.toggle('hidden', rows.length > 0);
-  const groups = [...new Set(rows.map(groupKey))];
-  const stamps = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
-  const totals = sumByGroup(rows, ['ts']);
 
-  const datasets = groups.map(g => {
-    const color = seriesColor(g);
+  // 구역(floor) 단위로 그린다 — P1/P2 주차장처럼 같은 그룹 안의 서로 다른 주차장이
+  // 합쳐지면 "제1주차장이 찼는지"를 볼 수 없다. 색은 그룹을 따라가고, 같은 그룹 안의
+  // 구역들은 선 모양으로 나눈다 (팔레트가 8슬롯이라 19개를 색으로만 구분할 수 없다).
+  const floors = [...new Set(rows.map(r => r.floor))].sort();
+  const stamps = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
+
+  const byFloorTs = new Map();
+  for (const r of rows) byFloorTs.set(`${r.floor}|${r.ts}`, r);
+
+  const datasets = floors.map(floor => {
+    const color = floorColor(floor);
     return {
-      label: g,
-      data: stamps.map(ts => totals.get(JSON.stringify([g, ts])) ?? null),
+      label: shortFloor(floor),
+      data: stamps.map(ts => {
+        const r = byFloorTs.get(`${floor}|${ts}`);
+        return r ? usedPercent([r]) : null;
+      }),
+      $free: stamps.map(ts => byFloorTs.get(`${floor}|${ts}`)?.available ?? null),
       spanGaps: true,
       pointRadius: 0,
       pointHoverRadius: 4,
       borderWidth: 2,
       borderColor: color,
       backgroundColor: color,
+      borderDash: floorDash(floor),
       borderJoinStyle: 'round',
       borderCapStyle: 'round',
       tension: 0,
@@ -373,7 +442,11 @@ async function loadSeries() {
       labels: stamps.map(ts => new Date(ts * 1000).toLocaleString('ko-KR')),
       datasets,
     },
-    options: commonLineOptions('가용 면수'),
+    options: occupancyOptions(ctx => {
+      const free = ctx.dataset.$free?.[ctx.dataIndex];
+      return free === null || free === undefined
+        ? null : `${Math.round(free).toLocaleString('ko-KR')}면 남음`;
+    }),
   });
   seriesChart.$stamps = stamps;   // 음영 플러그인이 라벨 인덱스를 찾는 데 쓴다
   seriesChart.update();
@@ -385,20 +458,25 @@ function renderHolidayJump(runs) {
   ).join('');
 }
 
+let patternToken = 0;
+
 async function loadPattern() {
+  const token = ++patternToken;
   const rows = await (await fetch('/api/pattern')).json();
+  if (token !== patternToken) return;
   const mine = rows.filter(passesFilter);
 
-  const avail = sumByGroup(mine, ['dow', 'hour']);
-
-  // 그룹 합계의 표본 수는 구성 구역 중 최소값으로 본다.
-  const samples = new Map();
+  // 요일×시간 칸마다 필터에 걸린 구역 전체를 모아 사용률 하나를 낸다. 비율을 평균내지
+  // 않고 면수를 합친 뒤 나눈다 — 크기가 다른 주차장이 섞이면 결과가 달라진다.
+  const cell = new Map();
   for (const r of mine) {
-    const k = JSON.stringify([groupKey(r), r.dow, r.hour]);
-    samples.set(k, Math.min(samples.get(k) ?? Infinity, r.samples));
+    const k = `${r.dow}|${r.hour}`;
+    (cell.get(k) ?? cell.set(k, []).get(k)).push(r);
   }
-  document.getElementById('thin').classList.toggle(
-    'hidden', ![...samples.values()].some(n => n < 3));
+
+  // 표본 수는 구성 구역 중 최소값으로 본다 — 하나라도 얇으면 그 칸은 못 믿는다.
+  const thin = [...cell.values()].some(rs => Math.min(...rs.map(r => r.samples)) < 3);
+  document.getElementById('thin').classList.toggle('hidden', !thin);
 
   const hours = [...Array(24).keys()];
   const datasets = DOW.map((name, dow) => {
@@ -406,12 +484,12 @@ async function loadPattern() {
     return {
       label: name,
       data: hours.map(h => {
-        let sum = null;
-        for (const g of new Set(mine.map(groupKey))) {
-          const v = avail.get(JSON.stringify([g, dow, h]));
-          if (v !== undefined) sum = (sum ?? 0) + v;
-        }
-        return sum;
+        const rs = cell.get(`${dow}|${h}`);
+        return rs ? usedPercent(rs) : null;
+      }),
+      $free: hours.map(h => {
+        const rs = cell.get(`${dow}|${h}`);
+        return rs ? rs.reduce((a, r) => a + r.available, 0) : null;
       }),
       spanGaps: true,
       pointRadius: 0,
@@ -431,7 +509,11 @@ async function loadPattern() {
   patternChart = new Chart(document.getElementById('chart-pattern'), {
     type: 'line',
     data: { labels: hours.map(h => `${h}시`), datasets },
-    options: commonLineOptions('평균 가용 면수'),
+    options: occupancyOptions(ctx => {
+      const free = ctx.dataset.$free?.[ctx.dataIndex];
+      return free === null || free === undefined
+        ? null : `평균 ${Math.round(free).toLocaleString('ko-KR')}면 남음`;
+    }),
   });
 }
 

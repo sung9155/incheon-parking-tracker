@@ -66,7 +66,8 @@ BUCKET_SECONDS = 3600
 SHORT_BUCKET_SECONDS = 300  # 수집 주기와 맞춘다 — 한 번의 폴이 x축 한 점에 떨어지도록
 
 _SERIES_BUCKETED = """
-SELECT (ts / ?) * ? AS ts, floor, AVG(capacity - parked) AS available
+SELECT (ts / ?) * ? AS ts, floor, AVG(capacity - parked) AS available,
+       AVG(capacity) AS capacity
 FROM parking
 WHERE ts BETWEEN ? AND ?
 GROUP BY 1, floor
@@ -86,6 +87,7 @@ SELECT CAST(strftime('%w', ts, 'unixepoch', 'localtime') AS INTEGER) AS dow,
        CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
        floor,
        AVG(capacity - parked) AS available,
+       AVG(capacity) AS capacity,
        COUNT(*) AS samples
 FROM parking
 GROUP BY dow, hour, floor
