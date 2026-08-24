@@ -477,7 +477,8 @@ def test_series_endpoint_honours_an_explicit_date_range(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         rows = client.get("/api/series?from=2026-09-24&to=2026-09-24").json()
 
-    bucket = (inside // db.SHORT_BUCKET_SECONDS) * db.SHORT_BUCKET_SECONDS
+    size = db.auto_bucket(*app.day_range_epoch("2026-09-24", "2026-09-24"))
+    bucket = (inside // size) * size
     assert [r["ts"] for r in rows] == [bucket]
 
 
@@ -580,3 +581,69 @@ def test_layout_diagram_covers_every_mapped_floor():
 
     assert len(listed) == len(set(listed)), "배치도에 중복된 구역이 있다"
     assert set(listed) == set(app.FLOOR_GROUPS)
+
+
+# ------------------------------------------------------- 조회 단위(버킷) 선택
+
+def test_auto_bucket_picks_the_finest_that_fits():
+    # 5분 수집이므로 하루는 288포인트 — 그대로 5분 단위로 볼 수 있다.
+    assert db.auto_bucket(0, DAY) == 300
+    # 7일을 5분으로 보면 2016포인트라 과하다. 10분(1008)이면 들어간다.
+    assert db.auto_bucket(0, 7 * DAY) == 600
+    # 30일은 30분(1440)까지 내려간다. 예전처럼 곧장 1시간으로 뭉개지 않는다.
+    assert db.auto_bucket(0, 30 * DAY) == 1800
+
+
+def test_auto_bucket_never_returns_a_bucket_that_blows_the_budget():
+    for days in (1, 3, 7, 30, 90, 365, 1000):
+        span = days * DAY
+        assert span / db.auto_bucket(0, span) <= db.TARGET_POINTS
+
+
+def test_series_honours_an_explicit_bucket(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [
+        (0, "A", 10, 100),      # 30분 버킷 0
+        (300, "A", 30, 100),    # 30분 버킷 0
+        (1800, "A", 50, 100),   # 30분 버킷 1800
+    ])
+
+    rows = db.series(con, 0, DAY, bucket=1800)
+
+    assert [(r["ts"], r["available"]) for r in rows] == [(0, 80.0), (1800, 50.0)]
+
+
+def test_explicit_bucket_is_honoured_even_past_the_auto_target(tmp_path):
+    # 자동은 7일에 10분을 고르지만, 사람이 5분을 고르면 그대로 5분이어야 한다.
+    # 직접 고른 해상도를 조용히 내려버리면 고른 의미가 없다.
+    assert db.auto_bucket(0, 7 * DAY) == 600
+    assert db.clamp_bucket(0, 7 * DAY, 300) == 300
+
+
+def test_series_clamps_a_bucket_that_would_return_too_many_points(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(0, "A", 10, 100)])
+
+    # 1년을 5분 단위로 달라는 요청은 10만 포인트가 넘는다. 조용히 굵은 단위로 내린다.
+    span = 365 * DAY
+    used = db.clamp_bucket(0, span, 300)
+
+    assert used > 300
+    assert span / used <= db.MAX_POINTS
+
+
+def test_series_endpoint_accepts_a_bucket_parameter(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    con = db.connect(tmp_path / "t.db")
+    base = int(datetime(2026, 9, 24, 0, 0).timestamp())
+    db.insert_rows(con, [(base, "A", 10, 100), (base + 600, "A", 30, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        half = client.get("/api/series?from=2026-09-24&to=2026-09-24&bucket=1800").json()
+        fine = client.get("/api/series?from=2026-09-24&to=2026-09-24&bucket=300").json()
+
+    assert len(half) == 1          # 두 관측이 같은 30분 버킷에 들어간다
+    assert len(fine) == 2          # 5분 단위로는 따로 떨어진다

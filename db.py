@@ -61,9 +61,38 @@ def latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-BUCKET_THRESHOLD_SECONDS = 3 * 86400
-BUCKET_SECONDS = 3600
-SHORT_BUCKET_SECONDS = 300  # 수집 주기와 맞춘다 — 한 번의 폴이 x축 한 점에 떨어지도록
+# 고를 수 있는 조회 단위. 맨 아래는 수집 주기(300초)와 같다 — 한 번의 폴이 x축 한 점에
+# 떨어지므로 이보다 잘게 쪼개는 것은 의미가 없다.
+BUCKETS = (300, 600, 1800, 3600, 21600, 86400)
+
+# 자동 선택이 지키는 목표치. 아무것도 고르지 않은 사람에게는 가볍고 빠른 쪽이 낫다.
+TARGET_POINTS = 1500
+
+# 사용자가 단위를 직접 골랐을 때 허용하는 상한. 자동보다 넉넉하다 — 직접 고른 해상도를
+# 조용히 내려버리면 고른 의미가 없다. 이 선을 넘을 때만(예: 30일치 5분 = 8,640포인트)
+# 굵은 쪽으로 내린다.
+MAX_POINTS = 6000
+
+
+def _finest_within(span: int, limit: int) -> int:
+    for bucket in BUCKETS:
+        if span / bucket <= limit:
+            return bucket
+    return BUCKETS[-1]
+
+
+def auto_bucket(start: int, end: int) -> int:
+    """포인트 수가 목표를 넘지 않는 선에서 가장 촘촘한 단위를 고른다.
+
+    "3일 넘으면 무조건 1시간" 같은 고정 임계값을 쓰지 않는다 — 그러면 7일 조회가
+    5분 수집 데이터를 시간 단위로 뭉개버려, 실제로 측정한 해상도를 버리게 된다.
+    """
+    return _finest_within(max(end - start, 1), TARGET_POINTS)
+
+
+def clamp_bucket(start: int, end: int, bucket: int) -> int:
+    """직접 고른 단위를 존중하되, 감당 못 할 양이 되면 굵은 쪽으로 내린다."""
+    return max(bucket, _finest_within(max(end - start, 1), MAX_POINTS))
 
 _SERIES_BUCKETED = """
 SELECT (ts / ?) * ? AS ts, floor, AVG(capacity - parked) AS available,
@@ -75,10 +104,11 @@ ORDER BY 1, floor
 """
 
 
-def series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
+def series(con: sqlite3.Connection, start: int, end: int,
+           bucket: int | None = None) -> list[sqlite3.Row]:
     # 반환되는 ts는 버킷의 "바닥"이라 start보다 작을 수 있다 (예: series(400, 600) -> ts=300).
     # off-by-one이 아니라 의도된 동작 — ts는 그 버킷을 대표하는 값이다.
-    bucket = BUCKET_SECONDS if end - start > BUCKET_THRESHOLD_SECONDS else SHORT_BUCKET_SECONDS
+    bucket = auto_bucket(start, end) if bucket is None else clamp_bucket(start, end, bucket)
     return con.execute(_SERIES_BUCKETED, (bucket, bucket, start, end)).fetchall()
 
 

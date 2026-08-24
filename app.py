@@ -332,9 +332,12 @@ def api_current():
 def api_series(
     from_value: str = Query(alias="from"),
     to_value: str = Query(alias="to"),
+    bucket: str = Query(default="auto"),
 ):
     start, end = day_range_epoch(from_value, to_value)
-    return [_with_group(r) for r in db.series(app.state.con, start, end)]
+    # 알 수 없는 값은 자동으로 흘려보낸다 — 조회 해상도 때문에 화면이 죽을 이유는 없다.
+    size = int(bucket) if bucket.isdigit() and int(bucket) in db.BUCKETS else None
+    return [_with_group(r) for r in db.series(app.state.con, start, end, size)]
 
 
 @app.get("/api/holidays")

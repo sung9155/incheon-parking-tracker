@@ -186,6 +186,16 @@
       </span>
     </div>
   </fieldset>
+  <fieldset>
+    <legend>단위</legend>
+    <select id="bucket" aria-label="조회 단위">
+      <option value="auto" selected>자동</option>
+      <option value="300">5분</option>
+      <option value="600">10분</option>
+      <option value="1800">30분</option>
+      <option value="3600">1시간</option>
+    </select>
+  </fieldset>
 </div>
 
 <div class="tabs" role="tablist">
@@ -619,9 +629,10 @@ async function loadSeries() {
   const { from, to } = currentRange();
   if (!from || !to || from > to) return;
   const mine = ++seriesToken;
+  const bucket = document.getElementById('bucket').value;
   const q = `from=${from}&to=${to}`;
   const [all, runs, pattern] = await Promise.all([
-    fetch(`/api/series?${q}`).then(r => r.json()),
+    fetch(`/api/series?${q}&bucket=${bucket}`).then(r => r.json()),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
     getPattern(),
   ]);
@@ -811,6 +822,7 @@ buildChips('filter-kind', KINDS, 'kind', refreshAll);
 
 document.getElementById('from').onchange = loadSeries;
 document.getElementById('to').onchange = loadSeries;
+document.getElementById('bucket').onchange = loadSeries;
 
 document.querySelector('.quick').addEventListener('click', e => {
   const days = e.target.dataset.days;
