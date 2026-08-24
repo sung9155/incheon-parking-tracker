@@ -93,6 +93,25 @@
   #holiday-jump { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0 0; }
   #holiday-jump button { font-size: .85rem; padding: .25rem .6rem; }
   #empty-note { color: var(--text-secondary); font-size: .9rem; margin: .6rem 0 0; }
+
+  #detail { margin: 2rem 0 3rem; }
+  #detail h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: .5rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  th, td { padding: .5rem .75rem; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { background: var(--surface); color: var(--text-secondary); font-weight: 600;
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; cursor: pointer;
+    user-select: none; }
+  thead th:hover { color: var(--text-primary); }
+  thead th[aria-sort] { color: var(--text-primary); }
+  thead th[aria-sort]::after { content: ' ▾'; font-size: .75em; }
+  thead th[aria-sort="ascending"]::after { content: ' ▴'; }
+  tbody tr + tr td { border-top: 1px solid var(--border); }
+  .pct-cell { display: inline-flex; align-items: center; gap: .55rem; }
+  .pct-cell .num { min-width: 2.6rem; text-align: right; }
+  td .gauge { width: 4.5rem; margin: 0; }
+  .num { font-variant-numeric: tabular-nums; }
 </style>
 
 <h1>인천공항 주차 현황</h1>
@@ -138,6 +157,25 @@
   <p id="thin" class="hidden">표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.</p>
   <div class="chart-box"><canvas id="chart-pattern"></canvas></div>
 </div>
+
+<section id="detail">
+  <h2>구역별 상세</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th data-sort="floor" scope="col">구역</th>
+          <th data-sort="terminal" scope="col">터미널</th>
+          <th data-sort="kind" scope="col">유형</th>
+          <th data-sort="available" scope="col">남은 자리</th>
+          <th data-sort="capacity" scope="col">전체</th>
+          <th data-sort="used" scope="col">사용률</th>
+        </tr>
+      </thead>
+      <tbody id="detail-rows"></tbody>
+    </table>
+  </div>
+</section>
 
 <script>
 const groupKey = r => `${r.terminal} ${r.kind}`;
@@ -368,6 +406,9 @@ async function loadCurrent() {
   // 각 구역의 색이 튀지 않는다.
   [...new Set(all.map(r => r.floor))].sort().forEach(floorSlot);
 
+  detailRows = all;
+  renderDetail();
+
   const rows = all.filter(passesFilter);
   const totals = sumByGroup(rows, []);
   const caps = sumByGroup(rows, [], 'capacity');
@@ -389,6 +430,45 @@ async function loadCurrent() {
       '갱신: ' + new Date(Math.max(...all.map(r => r.ts)) * 1000).toLocaleString('ko-KR');
   }
 }
+
+// 표 정렬 상태. 기본은 사용률 높은 순 — "어디가 찼나"가 먼저 알고 싶은 값이다.
+let sortKey = 'used', sortAsc = false;
+let detailRows = [];
+
+function renderDetail() {
+  const rows = detailRows.filter(passesFilter).map(r => ({
+    ...r, used: r.capacity ? (r.capacity - r.available) / r.capacity * 100 : 0,
+  }));
+  const dir = sortAsc ? 1 : -1;
+  rows.sort((a, b) => {
+    const x = a[sortKey], y = b[sortKey];
+    return (typeof x === 'string' ? x.localeCompare(y, 'ko') : x - y) * dir;
+  });
+
+  document.getElementById('detail-rows').innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.floor}</td>
+      <td>${r.terminal}</td>
+      <td>${r.kind}</td>
+      <td class="num">${r.available.toLocaleString('ko-KR')}</td>
+      <td class="num">${r.capacity.toLocaleString('ko-KR')}</td>
+      <td><span class="pct-cell"><span class="num">${Math.round(r.used)}%</span>
+        <span class="gauge"><i style="width:${Math.round(r.used)}%"></i></span></span></td>
+    </tr>`).join('');
+
+  for (const th of document.querySelectorAll('thead th')) {
+    if (th.dataset.sort === sortKey) th.setAttribute('aria-sort', sortAsc ? 'ascending' : 'descending');
+    else th.removeAttribute('aria-sort');
+  }
+}
+
+document.querySelector('thead').addEventListener('click', e => {
+  const key = e.target.closest('th')?.dataset.sort;
+  if (!key) return;
+  if (key === sortKey) sortAsc = !sortAsc;
+  else { sortKey = key; sortAsc = key === 'floor' || key === 'terminal' || key === 'kind'; }
+  renderDetail();
+});
 
 let seriesChart, patternChart;
 
@@ -573,6 +653,7 @@ const activeTab = () =>
 
 // 필터는 카드와 두 차트 모두에 걸린다. 서버 왕복 없이 다시 그리기만 한다.
 function refreshAll() {
+  renderDetail();          // 표는 이미 받아둔 데이터로 즉시 다시 그린다
   loadCurrent();
   (activeTab() === 'series' ? loadSeries : loadPattern)();
 }
