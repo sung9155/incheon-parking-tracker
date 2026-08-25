@@ -369,9 +369,10 @@ function sumByGroup(rows, keyFields, field = 'available') {
 // 한 번 배정된 그룹은 필터링/재조회로 목록이 바뀌어도 같은 슬롯을 유지한다
 // (recolor-on-filter 금지 — 색은 항목을 따라가야지 순번을 따라가면 안 된다).
 const PALETTE_SLOTS = 8;
-// 구역이 8개(팔레트 슬롯 수)를 넘어가면 색이 돌아온다. 그때 선 모양이 두 번째
-// 구분 채널이 되어 같은 색끼리도 갈린다.
-const DASHES = [[], [6, 3], [2, 3], [10, 3, 2, 3]];
+// 점선은 오직 "평소 기준선" 하나를 뜻한다. 구역이 8개를 넘으면 색이 돌아오지만,
+// 거기에 점선을 두 번째 구분 채널로 쓰면 화면에 점선이 열 개 넘게 깔려 정작 기준선을
+// 못 알아본다 — 그리고 19개를 한꺼번에 읽는 일은 어차피 없다. 하나를 고르면 그 선만
+// 굵은 실선으로 남고 기준선만 점선이라 최대한 구별된다.
 
 // 구역별 색. 정렬된 전체 목록에서의 위치로 슬롯을 정하므로, 필터를 걸어 일부만
 // 남아도 각 구역의 색이 그대로 유지된다 (recolor-on-filter 금지).
@@ -384,7 +385,6 @@ function floorSlot(floor) {
 }
 
 const floorColor = f => cssVar(`--series-${(floorSlot(f) % PALETTE_SLOTS) + 1}`);
-const floorDash = f => DASHES[Math.floor(floorSlot(f) / PALETTE_SLOTS) % DASHES.length];
 const knownGroups = ['T1 단기', 'T1 장기', 'T1 예약', 'T2 단기', 'T2 장기', 'T2 예약'];
 
 function cssVar(name) {
@@ -447,13 +447,28 @@ function occupancyOptions(tooltipExtra) {
   return o;
 }
 
+// CSS의 @media (max-width: 34rem)와 같은 값. 캔버스는 CSS로 못 다루므로 여기서 맞춘다.
+const NARROW_PX = 544;
+
 function commonLineOptions(yTitle) {
   return {
     responsive: true,
     maintainAspectRatio: false,
+    onResize(chart) {
+      const show = window.innerWidth > NARROW_PX;
+      if (chart.options.plugins.legend.display !== show) {
+        chart.options.plugins.legend.display = show;
+        chart.update('none');
+      }
+    },
     interaction: { mode: 'index', intersect: false }, // 한 X에서 모든 시리즈를 한 번에
     plugins: {
-      legend: { labels: { usePointStyle: true, pointStyle: 'line', color: cssVar('--text-secondary') } },
+      // 19개짜리 범례는 폰에서 화면의 3분의 1을 먹는다. 구역 선택은 배치도가 하므로
+      // 좁은 화면에서는 없는 편이 낫다.
+      legend: {
+        display: window.innerWidth > NARROW_PX,
+        labels: { usePointStyle: true, pointStyle: 'line', color: cssVar('--text-secondary') },
+      },
       tooltip: { usePointStyle: true },
     },
     scales: {
@@ -705,7 +720,6 @@ async function loadSeries() {
       borderWidth: 2,
       borderColor: color,
       backgroundColor: color,
-      borderDash: floorDash(floor),
       borderJoinStyle: 'round',
       borderCapStyle: 'round',
       tension: 0,
