@@ -19,6 +19,10 @@
     --occ-low: #3d8f4e;
     --occ-mid: #c9821f;
     --occ-high: #c8402f;
+    --pax-dep: rgba(90, 120, 200, 0.16);
+    --pax-arr: rgba(70, 155, 120, 0.16);
+    --pax-dep-line: rgba(90, 120, 200, 0.55);
+    --pax-arr-line: rgba(70, 155, 120, 0.55);
     /* categorical palette, fixed order — never reassigned by rank (see dataviz skill) */
     --series-1: #2a78d6; /* blue */
     --series-2: #eb6834; /* orange */
@@ -43,6 +47,10 @@
       --occ-low: #62b874;
       --occ-mid: #e0a244;
       --occ-high: #f0705c;
+      --pax-dep: rgba(130, 160, 240, 0.18);
+      --pax-arr: rgba(105, 200, 160, 0.18);
+      --pax-dep-line: rgba(130, 160, 240, 0.6);
+      --pax-arr-line: rgba(105, 200, 160, 0.6);
       --series-1: #3987e5;
       --series-2: #d95926;
       --series-3: #199e70;
@@ -436,12 +444,26 @@ function occupancyOptions(tooltipExtra) {
   o.scales.y.min = 0;
   o.scales.y.max = 100;
   o.scales.y.ticks.callback = v => `${v}%`;
+  // 여객 수는 사용률과 단위가 달라 오른쪽 축을 따로 쓴다.
+  o.scales.y1 = {
+    position: 'right',
+    beginAtZero: true,
+    grid: { drawOnChartArea: false },      // 왼쪽 축 격자와 겹치면 읽기 어렵다
+    ticks: {
+      color: cssVar('--muted'),
+      callback: v => v.toLocaleString('ko-KR'),
+    },
+    title: { display: true, text: '예상 여객 (명/시간)', color: cssVar('--text-secondary') },
+  };
   o.plugins.tooltip.callbacks = {
     label: ctx => {
-      const pct = ctx.parsed.y;
-      if (pct === null) return null;
+      const v = ctx.parsed.y;
+      if (v === null) return null;
+      if (ctx.dataset.yAxisID === 'y1') {
+        return `${ctx.dataset.label}: ${Math.round(v).toLocaleString('ko-KR')}명`;
+      }
       const extra = tooltipExtra?.(ctx);
-      return `${ctx.dataset.label}: ${pct.toFixed(1)}%` + (extra ? ` (${extra})` : '');
+      return `${ctx.dataset.label}: ${v.toFixed(1)}%` + (extra ? ` (${extra})` : '');
     },
   };
   return o;
@@ -467,7 +489,12 @@ function commonLineOptions(yTitle) {
       // 좁은 화면에서는 없는 편이 낫다.
       legend: {
         display: window.innerWidth > NARROW_PX,
-        labels: { usePointStyle: true, pointStyle: 'line', color: cssVar('--text-secondary') },
+        labels: {
+          usePointStyle: true, pointStyle: 'line', color: cssVar('--text-secondary'),
+          // 감춘 시리즈는 범례에서도 뺀다. 구역 하나를 고르면 19줄짜리 범례가
+          // 그대로 남아 정작 무엇을 보고 있는지 가린다.
+          filter: item => !item.hidden,
+        },
       },
       tooltip: { usePointStyle: true },
     },
@@ -529,8 +556,9 @@ function applyFocus() {
   for (const d of seriesChart.data.datasets) {
     // 흐리게 두면 툴팁에 19줄이 그대로 뜬다. 아예 감춰야 고른 것만 남는다.
     // 기준선은 비교 대상이라 항상 남긴다.
-    d.hidden = !!target && !d.$baseline && d.$floor !== target;
-    d.borderWidth = d.$baseline ? 1.5 : (target ? 3 : 2);
+    d.hidden = !!target && !d.$context && d.$floor !== target;
+    if (d.$context) continue;            // 여객·기준선 두께는 건드리지 않는다
+    d.borderWidth = target ? 3 : 2;
   }
   // 고른 게 없으면 19줄이 겹쳐 있으므로 툴팁은 커서에 가장 가까운 하나만 — 고른 게
   // 있으면 두 줄(고른 구역 + 평소)뿐이라 같은 x의 값을 나란히 보여주는 편이 낫다.
@@ -673,10 +701,11 @@ async function loadSeries() {
   document.getElementById('export').href = `/api/export.csv?${q}`;
   const seriesRes = await fetch(`/api/series?${q}&bucket=${bucket}`);
   const usedBucket = Number(seriesRes.headers.get('X-Bucket-Seconds')) || 300;
-  const [all, runs, pattern] = await Promise.all([
+  const [all, runs, pattern, pax] = await Promise.all([
     seriesRes.json(),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
     getPattern(),
+    fetch(`/api/passengers?${q}`).then(r => r.json()),
   ]);
   if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
   holidayRuns = runs;
@@ -742,11 +771,48 @@ async function loadSeries() {
     return usedPercent(rs);
   });
 
+  // 예상 여객수를 뒤에 깐다. 출국은 주차 수요를 만들고, 입국은 세워둔 차를 빼간다 —
+  // 두 방향이 반대로 작용하므로 둘 다 보여야 곡선을 읽을 수 있다.
+  // 여객은 시간 단위 데이터라 계단으로 그린다. 5분 축에 부드러운 곡선으로 그리면
+  // 실제로 없는 해상도를 있는 것처럼 보이게 한다.
+  const paxByHour = new Map();
+  for (const r of pax.filter(r => filters.terminal.has(r.terminal))) {
+    const k = `${r.adate}|${r.hour}|${r.direction}`;
+    paxByHour.set(k, (paxByHour.get(k) ?? 0) + r.expected);
+  }
+  const paxSeries = dir => stamps.map(ts => {
+    const d = new Date(ts * 1000);
+    const key = `${isoDate(d)}|${d.getHours()}|${dir}`;
+    return paxByHour.get(key) ?? null;
+  });
+
+  for (const [dir, fill, line] of [['출국', '--pax-dep', '--pax-dep-line'],
+                                   ['입국', '--pax-arr', '--pax-arr-line']]) {
+    const data = paxSeries(dir);
+    if (!data.some(v => v !== null)) continue;
+    datasets.unshift({
+      $context: true,              // 배경 정보라 구역을 골라도 계속 남는다
+      label: `${dir} 예상 여객`,
+      data,
+      yAxisID: 'y1',
+      stepped: 'middle',
+      fill: true,
+      backgroundColor: cssVar(fill),
+      borderColor: cssVar(line),
+      borderWidth: 1,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      spanGaps: false,
+      pointStyle: 'rectRounded',
+    });
+  }
+
   if (baseline.some(v => v !== null)) {
     datasets.unshift({           // 배열 앞 = 먼저 그려져 실측선 뒤로 깔린다
       $floor: null,
       $color: cssVar('--muted'),
       $baseline: true,
+      $context: true,
       label: '평소 (요일×시간 평균)',
       data: baseline,
       spanGaps: true,

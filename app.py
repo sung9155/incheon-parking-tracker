@@ -451,6 +451,15 @@ def api_series(
     return JSONResponse(rows, headers={"X-Bucket-Seconds": str(used)})
 
 
+@app.get("/api/passengers")
+def api_passengers(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+):
+    """시간대별 예상 승객수. 출국은 주차 수요를 만들고, 입국은 세워둔 차를 빼간다."""
+    return [dict(r) for r in db.passengers(app.state.con, from_value, to_value)]
+
+
 @app.get("/api/holidays")
 def api_holidays(
     from_value: str = Query(alias="from"),

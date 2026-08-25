@@ -929,3 +929,36 @@ def test_parse_passengers_totals_match_the_apis_own_sums():
                  if t == "T1" and d == "출국")
 
     assert t1_dep == int(float(item["t1dgsum1"]))
+
+
+def test_passengers_endpoint_returns_the_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    db.upsert_passengers(con, [
+        ("2026-08-25", 9, "T1", "출국", "1", 500),
+        ("2026-08-25", 9, "T1", "출국", "2", 300),
+        ("2026-08-25", 9, "T1", "입국", "C", 200),
+        ("2026-08-27", 9, "T1", "출국", "1", 999),      # 구간 밖
+    ], 1)
+    con.close()
+
+    with TestClient(app.app) as client:
+        rows = client.get("/api/passengers?from=2026-08-25&to=2026-08-26").json()
+
+    assert {r["adate"] for r in rows} == {"2026-08-25"}
+    dep = [r for r in rows if r["direction"] == "출국"]
+    assert sum(r["expected"] for r in dep) == 800
+
+
+def test_upsert_replaces_a_revised_forecast(tmp_path):
+    # 예고는 갱신된다. 주차와 달리 최신 값이 이겨야 한다.
+    con = db.connect(tmp_path / "t.db")
+    key = ("2026-08-25", 9, "T1", "출국", "1")
+    db.upsert_passengers(con, [(*key, 500)], 100)
+    db.upsert_passengers(con, [(*key, 620)], 200)
+
+    rows = db.passengers(con, "2026-08-25", "2026-08-25")
+
+    assert len(rows) == 1
+    assert rows[0]["expected"] == 620
