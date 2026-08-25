@@ -49,6 +49,24 @@ CREATE TABLE IF NOT EXISTS fees (
   last_seen  INTEGER NOT NULL,
   PRIMARY KEY (charid, chardesc)
 ) WITHOUT ROWID;
+
+-- 주차면 집계. 면 단위 원본(1.5만 행)을 그대로 쌓는 대신 구역별 점유와 체류 히스토그램만
+-- 시간당 1회 저장한다. "3일 이상 주차된 차 수"가 출차 예측의 독립 변수가 된다.
+CREATE TABLE IF NOT EXISTS space_stats (
+  ts       INTEGER NOT NULL,
+  terminal TEXT    NOT NULL,
+  lot      TEXT    NOT NULL,   -- parklotno (T2: 11=단기, 12=장기 평면)
+  zone     TEXT    NOT NULL,   -- parkzoneno
+  total    INTEGER NOT NULL,
+  occupied INTEGER NOT NULL,
+  d0_3   INTEGER NOT NULL,     -- 체류 0~3시간
+  d3_12  INTEGER NOT NULL,
+  d12_24 INTEGER NOT NULL,
+  d1_3   INTEGER NOT NULL,     -- 1~3일
+  d3_7   INTEGER NOT NULL,
+  d7p    INTEGER NOT NULL,     -- 7일 이상
+  PRIMARY KEY (ts, terminal, lot, zone)
+) WITHOUT ROWID;
 """
 
 
@@ -134,6 +152,24 @@ def upsert_fees(con: sqlite3.Connection, rows, seen_at: int) -> None:
         [(c, d, seen_at, seen_at) for c, d in rows],
     )
     con.commit()
+
+
+def upsert_space_stats(con: sqlite3.Connection, rows) -> None:
+    con.executemany(
+        "INSERT OR REPLACE INTO space_stats "
+        "(ts, terminal, lot, zone, total, occupied, d0_3, d3_12, d12_24, d1_3, d3_7, d7p) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(*r[:6], *r[6]) for r in rows],
+    )
+    con.commit()
+
+
+def space_stats_latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    return con.execute(
+        "SELECT MAX(ts) AS ts, terminal, lot, zone, total, occupied, "
+        "d0_3, d3_12, d12_24, d1_3, d3_7, d7p "
+        "FROM space_stats GROUP BY terminal, lot, zone ORDER BY terminal, lot, zone"
+    ).fetchall()
 
 
 def latest(con: sqlite3.Connection) -> list[sqlite3.Row]:

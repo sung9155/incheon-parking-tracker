@@ -178,6 +178,90 @@ async def collect_passengers(client: httpx.AsyncClient, con, key: str) -> int:
     return total
 
 
+# --------------------------------------------------- 주차면 집계 (체류 분포)
+#
+# 면 단위 API 두 개(T1 ParkLocationData / T2 parkLocationAreaData). 입차 시각이 면마다
+# 실측으로 오므로 체류시간 분포를 만들 수 있다 — T2는 안내와 달리 장기 평면(lot 12)까지
+# 포함한다(체류 중앙값 31.5h로 확인). 원본을 쌓지 않고 구역별 집계만 저장한다.
+SPACE_APIS = (
+    "https://apis.data.go.kr/B551177/ParkLocationData/getParkLocationData",
+    "https://apis.data.go.kr/B551177/parkLocationAreaData/getParkLocationAreaData",
+)
+
+# 체류 히스토그램 경계(시간): 0-3 / 3-12 / 12-24 / 1-3일 / 3-7일 / 7일+
+_DWELL_EDGES = (3, 12, 24, 72, 168)
+
+
+def space_aggregate(items: list[dict], now_ts: int) -> list[tuple]:
+    """(ts, terminal, lot, zone, total, occupied, 히스토그램6) 목록.
+
+    빈 면(carstatus != 'Y')의 carindate는 옛 세션의 찌꺼기라 무시한다. 점유 면이라도
+    입차 시각이 60일을 넘거나 미래면 센서 이상치로 보고 히스토그램에서만 뺀다.
+    """
+    zones: dict[tuple, list] = {}
+    for it in items:
+        key = (
+            it.get("terno") or it.get("terminalId") or "",
+            str(it.get("parklotno", "")),
+            str(it.get("parkzoneno", "")),
+        )
+        z = zones.setdefault(key, [0, 0, [0] * 6])
+        z[0] += 1
+        if it.get("carstatus") != "Y":
+            continue
+        z[1] += 1
+        raw = str(it.get("carindate", ""))[:14]
+        try:
+            entered = datetime.strptime(raw, "%Y%m%d%H%M%S").timestamp()
+        except ValueError:
+            continue
+        hours = (now_ts - entered) / 3600
+        if not (0 <= hours < 60 * 24):
+            continue
+        for idx, edge in enumerate(_DWELL_EDGES):
+            if hours < edge:
+                z[2][idx] += 1
+                break
+        else:
+            z[2][5] += 1
+    return [
+        (now_ts, term, lot, zone, total, occ, tuple(hist))
+        for (term, lot, zone), (total, occ, hist) in sorted(zones.items())
+    ]
+
+
+async def collect_spaces(client: httpx.AsyncClient, con, key: str) -> int:
+    now_ts = int(time.time())
+    items: list[dict] = []
+    for url in SPACE_APIS:
+        page = 1
+        while True:
+            r = await client.get(
+                url,
+                params={"serviceKey": key, "numOfRows": 6000, "pageNo": page, "type": "json"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            payload = None
+            try:
+                payload = r.json()
+                body = payload["response"]["body"]
+                batch = body["items"]
+                if isinstance(batch, dict):
+                    batch = batch.get("item", [])
+            except (KeyError, ValueError, TypeError):
+                log.error("spaces failed to parse response: %s", _result_msg(payload))
+                raise
+            items += batch
+            # T2는 1만 행이 넘어 한 번에 안 온다. totalCount까지 페이지를 넘긴다.
+            if len(batch) < 6000 or page * 6000 >= int(body.get("totalCount", 0)):
+                break
+            page += 1
+    rows = space_aggregate(items, now_ts)
+    db.upsert_space_stats(con, rows)
+    return len(rows)
+
+
 # ------------------------------------------------------------- 주차 요금
 #
 # 요금 API(ParkingChargeInfo)는 규칙 "조각"만 준다 — 어느 주차장의 규칙인지 연결하는
@@ -570,6 +654,10 @@ def _congestion_last_ts(con):
     return con.execute("SELECT MAX(ts) FROM congestion").fetchone()[0]
 
 
+def _spaces_last_ts(con):
+    return con.execute("SELECT MAX(ts) FROM space_stats").fetchone()[0]
+
+
 def _fees_last_ts(con):
     return con.execute("SELECT MAX(last_seen) FROM fees").fetchone()[0]
 
@@ -587,6 +675,8 @@ SOURCES = [
     Source("congestion", CONGESTION_INTERVAL_SECONDS, collect_congestion, _congestion_last_ts),
     # 요금은 하루 한 번이면 충분하다 — 바뀌는 일 자체가 드물고, 목적은 변경 감지다.
     Source("fees", 86400, collect_fees, _fees_last_ts),
+    # 체류 분포는 시간 단위면 충분하다 — 회당 T1 1 + T2 2 호출, 하루 72회.
+    Source("spaces", 3600, collect_spaces, _spaces_last_ts),
 ]
 
 

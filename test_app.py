@@ -780,7 +780,7 @@ def test_series_reports_the_bucket_it_used(tmp_path, monkeypatch):
 def test_sources_are_declared_with_name_interval_and_collector():
     # 소스를 늘리는 일이 "리스트에 한 줄 추가"여야 한다. 루프를 복제하기 시작하면
     # 재시도 정책·로깅·종료 처리가 소스마다 갈라진다.
-    assert [s.name for s in app.SOURCES] == ["parking", "passengers", "congestion", "fees"]
+    assert [s.name for s in app.SOURCES] == ["parking", "passengers", "congestion", "fees", "spaces"]
     for src in app.SOURCES:
         assert src.interval > 0
         assert callable(src.collect)
@@ -822,7 +822,7 @@ def test_health_reports_each_source_separately(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         body = client.get("/api/health").json()
 
-    assert set(body["sources"]) == {"parking", "passengers", "congestion", "fees"}
+    assert set(body["sources"]) == {"parking", "passengers", "congestion", "fees", "spaces"}
     assert body["sources"]["parking"]["status"] == "ok"
     assert body["sources"]["parking"]["age_seconds"] < 300
     # 승객 예고는 한 번도 수집된 적이 없다 -> 그 소스는 stale이고,
@@ -1197,6 +1197,7 @@ def test_health_staleness_scales_with_the_source_interval(tmp_path, monkeypatch)
     db.upsert_passengers(con, [("2026-08-25", 9, "T1", "출국", "1", 1)], now - 60)
     db.upsert_congestion(con, [(now - 60, "T1", "DG1_E", 5, 10, 0, "00:00~24:00")])
     db.upsert_fees(con, [("FB1", "텍스트")], now - 20 * 3600)   # 20시간 전 — 하루 주기면 정상
+    db.upsert_space_stats(con, [(now - 90 * 60, "T1", "01", "01", 10, 5, (1, 1, 1, 1, 1, 0))])
     con.close()
 
     with TestClient(app.app) as client:
@@ -1275,3 +1276,50 @@ def test_flight_endpoint_serves_from_the_cached_list(tmp_path, monkeypatch):
 
     assert body["matches"][0]["flightId"] == "KE703"
     assert body["matches"][0]["scheduleDateTime"] == "1430"
+
+
+# --------------------------------------------------- 주차면 집계 (체류 분포)
+
+def test_space_aggregate_buckets_dwell_times():
+    now = int(datetime(2026, 8, 25, 12, 0).timestamp())
+    mk = lambda dt, status="Y": {"carstatus": status, "carindate": dt,
+                                 "parklotno": "01", "parkzoneno": "01", "terno": "T1"}
+    items = [
+        mk("20260825113000"),        # 30분 -> 0-3h
+        mk("20260825060000"),        # 6시간 -> 3-12h
+        mk("20260824100000"),        # 26시간 -> 1-3일
+        mk("20260817120000"),        # 8일 -> 7일+
+        mk("20220101000000"),        # 4년 전 — 이상치: 점유로는 세되 히스토그램 제외
+        mk("20260825110000", "N"),   # 빈 면 — 점유 아님
+    ]
+
+    rows = app.space_aggregate(items, now)
+
+    assert len(rows) == 1
+    ts, terminal, lot, zone, total, occupied, hist = rows[0]
+    assert (terminal, lot, zone) == ("T1", "01", "01")
+    assert total == 6 and occupied == 5
+    assert hist == (1, 1, 0, 1, 0, 1)      # (0-3h, 3-12h, 12-24h, 1-3일, 3-7일, 7일+)
+
+
+def test_space_aggregate_reads_t2_terminal_field():
+    # T1은 terno, T2는 terminalId — 필드명이 서로 다르다.
+    now = int(datetime(2026, 8, 25, 12, 0).timestamp())
+    items = [{"carstatus": "N", "carindate": "", "parklotno": "12",
+              "parkzoneno": "90", "terminalId": "T2"}]
+
+    rows = app.space_aggregate(items, now)
+
+    assert rows[0][1] == "T2"
+
+
+def test_space_stats_round_trip(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.upsert_space_stats(con, [
+        (1000, "T2", "12", "90", 555, 536, (10, 20, 30, 40, 50, 386)),
+    ])
+
+    r = db.space_stats_latest(con)[0]
+
+    assert r["occupied"] == 536
+    assert r["d7p"] == 386
