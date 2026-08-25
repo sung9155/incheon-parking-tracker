@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS congestion (
   operating    TEXT    NOT NULL,   -- '05:00~22:00' 등. 빈 문자열이면 그 시각 미운영
   PRIMARY KEY (ts, terminal, gate)
 ) WITHOUT ROWID;
+
+-- 주차 요금 규칙 텍스트의 이력. 요금 API는 규칙 조각만 주고 주차장 연결 필드가 없어
+-- 계산에는 못 쓰지만, 문구의 등장/소멸을 기록하면 요금 변경 시점을 알 수 있다.
+CREATE TABLE IF NOT EXISTS fees (
+  charid     TEXT NOT NULL,
+  chardesc   TEXT NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen  INTEGER NOT NULL,
+  PRIMARY KEY (charid, chardesc)
+) WITHOUT ROWID;
 """
 
 
@@ -114,6 +124,16 @@ def congestion_series(con: sqlite3.Connection, start: int, end: int,
         "GROUP BY 1, terminal, gate ORDER BY 1, terminal, gate",
         (bucket, bucket, start, end),
     ).fetchall()
+
+
+def upsert_fees(con: sqlite3.Connection, rows, seen_at: int) -> None:
+    """(charid, chardesc) 쌍의 최초/최종 목격 시각을 갱신한다."""
+    con.executemany(
+        "INSERT INTO fees (charid, chardesc, first_seen, last_seen) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(charid, chardesc) DO UPDATE SET last_seen = excluded.last_seen",
+        [(c, d, seen_at, seen_at) for c, d in rows],
+    )
+    con.commit()
 
 
 def latest(con: sqlite3.Connection) -> list[sqlite3.Row]:

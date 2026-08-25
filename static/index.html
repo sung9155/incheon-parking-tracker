@@ -177,6 +177,24 @@
     border: 1px solid var(--border); border-radius: .5rem; background: var(--surface); }
   #summary b { font-variant-numeric: tabular-nums; }
 
+  #flight-box { margin: .9rem 0 0; }
+  #flight-form { display: flex; gap: .4rem; }
+  #flight-q { flex: 1; max-width: 16rem; font: inherit; padding: .4rem .6rem;
+    color: var(--text-primary); background: var(--surface);
+    border: 1px solid var(--border); border-radius: .375rem; }
+  #flight-result { margin-top: .5rem; }
+  .flight-card { border: 1px solid var(--border); border-radius: .5rem;
+    padding: .7rem .9rem; background: var(--surface); font-size: .9rem; }
+  .flight-card b { font-variant-numeric: tabular-nums; }
+  .flight-note { color: var(--text-secondary); font-size: .82rem; margin-top: .25rem; }
+
+  #fee-calc { font-size: .9rem; margin: .6rem 0 0; padding: .55rem .8rem;
+    border: 1px solid var(--border); border-radius: .5rem; background: var(--surface); }
+  #fee-calc input { width: 3.2rem; font: inherit; padding: .2rem .35rem;
+    color: var(--text-primary); background: var(--bg);
+    border: 1px solid var(--border); border-radius: .3rem; text-align: right; }
+  #fee-calc b { font-variant-numeric: tabular-nums; }
+
   .term-tabs { margin: 1rem 0; }
   .term-tabs button { font-size: 1rem; padding: .5rem 1.1rem; }
 
@@ -241,6 +259,15 @@
 
 <p id="summary"></p>
 
+<div id="flight-box">
+  <form id="flight-form">
+    <input id="flight-q" type="text" inputmode="latin" autocomplete="off"
+           placeholder="편명으로 찾기 (예: KE703)" aria-label="항공편명">
+    <button type="submit">조회</button>
+  </form>
+  <div id="flight-result"></div>
+</div>
+
 <section id="congestion">
   <h2>출국장 혼잡도</h2>
   <p class="caveat" id="congestion-stamp"></p>
@@ -248,6 +275,12 @@
 </section>
 
 <div class="cards" id="cards"></div>
+
+<p id="fee-calc">주차 요금 계산 (소형차):
+  <input id="fee-days" type="number" min="0" max="60" value="3" aria-label="일"> 일
+  <input id="fee-hours" type="number" min="0" max="23" value="0" aria-label="시간"> 시간
+  → <span id="fee-out"></span>
+</p>
 
 <section id="shuttle">
   <h2>터미널 셔틀 시간표</h2>
@@ -925,6 +958,64 @@ async function loadShuttle() {
   renderLayout();          // 배치도 터미널 상자의 "다음 셔틀" 줄을 채운다
 }
 
+// ------------------------------------------------------------- 내 항공편
+async function searchFlight(ev) {
+  ev.preventDefault();
+  const q = document.getElementById('flight-q').value.trim();
+  const out = document.getElementById('flight-result');
+  if (q.length < 3) { out.innerHTML = ''; return; }
+  const body = await (await fetch(`/api/flight?q=${encodeURIComponent(q)}`)).json();
+  if (body.error) { out.innerHTML = `<div class="flight-card">${body.error}</div>`; return; }
+  if (!body.matches.length) {
+    out.innerHTML = `<div class="flight-card">오늘 출발편에서 '${q}'를 찾지 못했습니다.</div>`;
+    return;
+  }
+  const f = body.matches[0];
+
+  // 항공편의 터미널로 탭을 맞춘다 — 주차·혼잡도·셔틀이 전부 그 터미널 것으로 바뀐다.
+  if (f.terminal !== terminal) document.getElementById(`tab-${f.terminal}`).click();
+
+  const hhmm = t => t && t.length === 4 ? `${t.slice(0,2)}:${t.slice(2)}` : (t || '—');
+  const schedMin = f.scheduleDateTime && f.scheduleDateTime.length === 4
+    ? Number(f.scheduleDateTime.slice(0,2)) * 60 + Number(f.scheduleDateTime.slice(2)) : null;
+  // 국제선 관례 3시간 전. 규정이 아니라 권장이므로 그렇게 적는다.
+  const arrive = schedMin !== null
+    ? `${String(Math.floor(((schedMin - 180) + 1440) % 1440 / 60)).padStart(2,'0')}:${String((schedMin - 180 + 1440) % 60).padStart(2,'0')}` : null;
+
+  // 그 시간대 예상 출국 여객 (오늘, 항공편 터미널)
+  let paxLine = '';
+  if (schedMin !== null && paxTodayCache.rows.length) {
+    const hour = Math.floor(((schedMin - 180) + 1440) % 1440 / 60);
+    const n = paxTodayCache.rows
+      .filter(r => r.terminal === f.terminal && r.direction === '출국' && r.hour === hour)
+      .reduce((a, r) => a + r.expected, 0);
+    if (n) paxLine = ` · 그 시각 예상 출국 ${n.toLocaleString('ko-KR')}명`;
+  }
+
+  out.innerHTML = `<div class="flight-card">
+    <b>${f.flightId}</b> ${f.airline} · ${f.airport}행 ·
+    ${f.terminal}${f.concourse ? ' (탑승동 — 체크인·주차는 T1)' : ''} ·
+    출발 <b>${hhmm(f.scheduleDateTime)}</b>${f.estimatedDateTime && f.estimatedDateTime !== f.scheduleDateTime
+      ? ` (변경 <b>${hhmm(f.estimatedDateTime)}</b>)` : ''}${f.remark ? ` · ${f.remark}` : ''}
+    ${f.chkinrange ? `<div class="flight-note">체크인 카운터 ${f.chkinrange}${f.gatenumber ? ` · 게이트 ${f.gatenumber}` : ''}${
+      f.codeshare === 'Slave' && f.masterflightid ? ` · 공동운항(실제 ${f.masterflightid})` : ''}</div>` : ''}
+    ${arrive ? `<div class="flight-note">권장 공항 도착 <b>${arrive}</b> (출발 3시간 전 기준)${paxLine}</div>` : ''}
+  </div>`;
+}
+
+// ------------------------------------------------------------- 요금 계산
+async function updateFee() {
+  const d = Number(document.getElementById('fee-days').value) || 0;
+  const h = Number(document.getElementById('fee-hours').value) || 0;
+  const minutes = d * 1440 + h * 60;
+  const out = document.getElementById('fee-out');
+  if (minutes <= 0) { out.textContent = ''; return; }
+  const b = await (await fetch(`/api/fees/estimate?minutes=${minutes}`)).json();
+  const won = v => v.toLocaleString('ko-KR') + '원';
+  out.innerHTML = `단기 <b>${won(b.short)}</b> · 장기 <b>${won(b.long)}</b>`
+    + (b.drift.length ? ' <small>(요금 기준 변경 감지 — 값이 낡았을 수 있음)</small>' : '');
+}
+
 let seriesChart, patternChart, paxChart;
 
 // 필터를 빠르게 여러 번 누르면 요청이 겹친다. 토큰을 두어 늦게 도착한 옛 응답이
@@ -1313,6 +1404,11 @@ document.getElementById('holiday-jump').addEventListener('click', e => {
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   (activeTab() === 'series' ? loadSeries : loadPattern)();
 });
+
+document.getElementById('flight-form').addEventListener('submit', searchFlight);
+document.getElementById('fee-days').addEventListener('change', updateFee);
+document.getElementById('fee-hours').addEventListener('change', updateFee);
+updateFee();
 
 setRange(7);
 loadCurrent().then(loadSeries);

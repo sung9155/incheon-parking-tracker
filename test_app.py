@@ -780,7 +780,7 @@ def test_series_reports_the_bucket_it_used(tmp_path, monkeypatch):
 def test_sources_are_declared_with_name_interval_and_collector():
     # 소스를 늘리는 일이 "리스트에 한 줄 추가"여야 한다. 루프를 복제하기 시작하면
     # 재시도 정책·로깅·종료 처리가 소스마다 갈라진다.
-    assert [s.name for s in app.SOURCES] == ["parking", "passengers", "congestion"]
+    assert [s.name for s in app.SOURCES] == ["parking", "passengers", "congestion", "fees"]
     for src in app.SOURCES:
         assert src.interval > 0
         assert callable(src.collect)
@@ -822,7 +822,7 @@ def test_health_reports_each_source_separately(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         body = client.get("/api/health").json()
 
-    assert set(body["sources"]) == {"parking", "passengers", "congestion"}
+    assert set(body["sources"]) == {"parking", "passengers", "congestion", "fees"}
     assert body["sources"]["parking"]["status"] == "ok"
     assert body["sources"]["parking"]["age_seconds"] < 300
     # 승객 예고는 한 번도 수집된 적이 없다 -> 그 소스는 stale이고,
@@ -1140,3 +1140,138 @@ def test_shuttle_endpoint_serves_todays_day_type(tmp_path, monkeypatch):
     assert body["day_type"] in (1, 2)
     assert body["stops"][0]["times"] == ["04:58"]
     assert body["stops"][0]["_dt"] == body["day_type"]     # 오늘의 유형으로 조회했다
+
+
+# ------------------------------------------------------------- 주차 요금
+
+def test_fee_estimate_short_term_basic_and_increments():
+    # 공식 요금: 최초 30분 1,200원, 이후 15분당 600원(올림), 일 최대 24,000원.
+    assert app.fee_estimate("단기", 20) == 1200          # 최초 구간 안
+    assert app.fee_estimate("단기", 30) == 1200
+    assert app.fee_estimate("단기", 31) == 1800          # 1분 초과도 15분 단위 올림
+    assert app.fee_estimate("단기", 60) == 2400          # 30 + 15*2
+    assert app.fee_estimate("단기", 10 * 60) == 24000    # 일 최대에 걸린다
+
+
+def test_fee_estimate_multi_day_short_term_caps_per_day():
+    two_days_3h = (24 * 2 + 3) * 60
+    # 2일치 상한 + 3시간(30분 1,200 + 15분*10*600 = 7,200)
+    assert app.fee_estimate("단기", two_days_3h) == 24000 * 2 + 7200
+
+
+def test_fee_estimate_long_term_is_daily_ceiling():
+    assert app.fee_estimate("장기", 60) == 9000            # 1시간도 1일 요금
+    assert app.fee_estimate("장기", 24 * 60) == 9000
+    assert app.fee_estimate("장기", 24 * 60 + 1) == 18000  # 하루 넘는 순간 2일
+
+
+def test_pinned_fee_texts_exist_in_a_real_response():
+    # 계산기의 근거 문구가 API 응답에 실재하는지 대조한다. 공항이 요금을 바꾸면 이
+    # 대조가 깨져서 알게 된다 — 텍스트를 파싱해 계산하는 대신 고정값+검증을 택한 이유.
+    sample = {"response": {"body": {"items": [
+        {"charid": "FB00000001", "chardesc": "최초 00:30 에 한해 1200원 적용", "datetime": "x"},
+        {"charid": "FB00000001", "chardesc": "00:15 초과 시 600원 부과", "datetime": "x"},
+        {"charid": "NF00000001", "chardesc": "일일 최대 24000원 적용", "datetime": "x"},
+        {"charid": "NF00000002", "chardesc": "일일 최대 9000원 적용", "datetime": "x"},
+    ]}}}
+
+    assert app.fee_rules_drift(sample) == []
+
+
+def test_fee_rules_drift_reports_missing_texts():
+    drift = app.fee_rules_drift({"response": {"body": {"items": [
+        {"charid": "FB00000001", "chardesc": "최초 00:30 에 한해 1500원 적용", "datetime": "x"},
+    ]}}})
+
+    assert any("1200" in d for d in drift)               # 사라진 근거 문구가 보고된다
+
+
+def test_health_staleness_scales_with_the_source_interval(tmp_path, monkeypatch):
+    # 요금은 하루 한 번 수집한다. 전역 1시간 기준을 그대로 쓰면 이 소스는 항상
+    # stale로 읽혀 경보가 의미를 잃는다 — 주기의 2배까지는 정상으로 본다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    db.insert_rows(con, [(now - 60, "A", 10, 100)])
+    db.upsert_passengers(con, [("2026-08-25", 9, "T1", "출국", "1", 1)], now - 60)
+    db.upsert_congestion(con, [(now - 60, "T1", "DG1_E", 5, 10, 0, "00:00~24:00")])
+    db.upsert_fees(con, [("FB1", "텍스트")], now - 20 * 3600)   # 20시간 전 — 하루 주기면 정상
+    con.close()
+
+    with TestClient(app.app) as client:
+        body = client.get("/api/health").json()
+
+    assert body["sources"]["fees"]["status"] == "ok"
+    assert body["status"] == "ok"
+
+
+def test_fee_status_reports_drift_from_the_database(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    # 근거 문구 중 하나가 최근 수집에서 사라진 상황
+    for text in app.PINNED_FEE_TEXTS[1:]:
+        db.upsert_fees(con, [("X", text)], now)
+    db.upsert_fees(con, [("X", app.PINNED_FEE_TEXTS[0])], now - 10 * 86400)  # 옛날엔 있었다
+
+    missing = app.fee_status(con)
+
+    assert missing == [app.PINNED_FEE_TEXTS[0]]
+
+
+def test_fee_estimate_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        body = client.get("/api/fees/estimate?minutes=180").json()
+
+    assert body["short"] == 1200 + 600 * 10        # 3시간
+    assert body["long"] == 9000
+
+
+# ------------------------------------------------------------- 내 항공편
+
+FLIGHTS_SAMPLE = [
+    {"flightId": "KE703", "airline": "대한항공", "airport": "나리타", "scheduleDateTime": "1430",
+     "estimatedDateTime": "1445", "remark": "출발", "terminalId": "P01", "gatenumber": "12",
+     "chkinrange": "A01-A18", "codeshare": "Master", "masterflightid": ""},
+    {"flightId": "KE5951Y", "airline": "대한항공", "airport": "두바이", "scheduleDateTime": "0005",
+     "estimatedDateTime": "2347", "remark": "출발", "terminalId": "P01", "gatenumber": "43",
+     "chkinrange": "H19-H32", "codeshare": "Slave", "masterflightid": "EK323Y"},
+    {"flightId": "LJ201", "airline": "진에어", "airport": "괌", "scheduleDateTime": "0900",
+     "estimatedDateTime": "", "remark": "", "terminalId": "P02", "gatenumber": "",
+     "chkinrange": "", "codeshare": "Master", "masterflightid": ""},
+]
+
+
+def test_flight_search_tolerates_zero_padding_and_suffix():
+    # 사용자는 'KE0703'이라 치지만 실제 ID는 'KE703'이고, 'KE5951'의 실제 ID는
+    # 'KE5951Y'다. 정규화 없이 정확 일치만 하면 둘 다 못 찾는다.
+    assert [f["flightId"] for f in app.flight_search(FLIGHTS_SAMPLE, "KE0703")] == ["KE703"]
+    assert [f["flightId"] for f in app.flight_search(FLIGHTS_SAMPLE, "ke5951")] == ["KE5951Y"]
+    assert app.flight_search(FLIGHTS_SAMPLE, "OZ999") == []
+
+
+def test_flight_search_maps_concourse_to_t1():
+    # P02는 탑승동 — 체크인과 주차는 T1에서 한다. P02를 그대로 내보내면 사용자가
+    # 주차할 터미널을 알 수 없다.
+    got = app.flight_search(FLIGHTS_SAMPLE, "LJ201")[0]
+    assert got["terminal"] == "T1"
+    assert got["concourse"] is True          # 탑승동임은 따로 표시한다
+
+
+def test_flight_endpoint_serves_from_the_cached_list(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    async def fake_fetch():
+        return FLIGHTS_SAMPLE
+
+    monkeypatch.setattr(app, "fetch_departures", fake_fetch)
+
+    with TestClient(app.app) as client:
+        body = client.get("/api/flight?q=KE703").json()
+
+    assert body["matches"][0]["flightId"] == "KE703"
+    assert body["matches"][0]["scheduleDateTime"] == "1430"

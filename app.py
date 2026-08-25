@@ -178,6 +178,161 @@ async def collect_passengers(client: httpx.AsyncClient, con, key: str) -> int:
     return total
 
 
+# ------------------------------------------------------------- 주차 요금
+#
+# 요금 API(ParkingChargeInfo)는 규칙 "조각"만 준다 — 어느 주차장의 규칙인지 연결하는
+# 필드가 없다(charid뿐, 매핑 표는 응답에 없음). 자유 텍스트를 파싱해 계산하면 공항이
+# 문구를 바꾸는 순간 조용히 틀리므로, 널리 공지된 공식 요금을 여기 고정하고 그 근거
+# 문구가 API 응답에 실재하는지 매일 대조한다. 문구가 사라지면 요금이 바뀐 것이다.
+FEE_API_URL = "https://apis.data.go.kr/B551177/ParkingChargeInfo/getParkingChargeInformation"
+
+# 소형차 기준 공식 요금 (2026-08 확인). 대형·화물 구역 요금은 다루지 않는다.
+FEE_SHORT_BASE_MIN, FEE_SHORT_BASE_WON = 30, 1200      # 최초 30분 1,200원
+FEE_SHORT_STEP_MIN, FEE_SHORT_STEP_WON = 15, 600       # 이후 15분당 600원
+FEE_SHORT_DAY_CAP = 24000                              # 일 최대
+FEE_LONG_DAY = 9000                                    # 장기 소형, 일 단위
+
+# 위 고정값의 근거 문구. fee_rules_drift가 실제 응답과 대조한다.
+PINNED_FEE_TEXTS = (
+    "최초 00:30 에 한해 1200원 적용",
+    "00:15 초과 시 600원 부과",
+    "일일 최대 24000원 적용",
+    "일일 최대 9000원 적용",
+)
+
+
+def fee_estimate(kind: str, minutes: int) -> int:
+    """소형차 기준 예상 요금. kind는 '단기' 또는 '장기'."""
+    if minutes <= 0:
+        return 0
+    if kind == "장기":
+        return -(-minutes // (24 * 60)) * FEE_LONG_DAY          # 일 단위 올림
+    days, rest = divmod(minutes, 24 * 60)
+    if rest == 0:
+        return days * FEE_SHORT_DAY_CAP
+    if rest <= FEE_SHORT_BASE_MIN:
+        partial = FEE_SHORT_BASE_WON
+    else:
+        steps = -(-(rest - FEE_SHORT_BASE_MIN) // FEE_SHORT_STEP_MIN)   # 올림
+        partial = FEE_SHORT_BASE_WON + steps * FEE_SHORT_STEP_WON
+    return days * FEE_SHORT_DAY_CAP + min(partial, FEE_SHORT_DAY_CAP)
+
+
+def fee_status(con) -> list[str]:
+    """DB 기준 드리프트: 최근 이틀 안에 목격되지 않은 근거 문구. 수집기가 매일 채운다."""
+    import time as _t
+    cutoff = int(_t.time()) - 2 * 86400
+    fresh = {r[0] for r in con.execute(
+        "SELECT chardesc FROM fees WHERE last_seen >= ?", (cutoff,))}
+    return [x for x in PINNED_FEE_TEXTS if x not in fresh]
+
+
+async def collect_fees(client: httpx.AsyncClient, con, key: str) -> int:
+    r = await client.get(
+        FEE_API_URL,
+        params={"serviceKey": key, "numOfRows": 100, "pageNo": 1, "type": "json"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    payload = None
+    try:
+        payload = r.json()
+        items = payload["response"]["body"]["items"]
+        if isinstance(items, dict):
+            items = items.get("item", [])
+        rows = [(str(it.get("charid", "")), str(it.get("chardesc", "")).strip()) for it in items]
+    except (KeyError, ValueError, TypeError):
+        log.error("fees failed to parse response: %s", _result_msg(payload))
+        raise
+    db.upsert_fees(con, rows, int(time.time()))
+    missing = fee_rules_drift(payload)
+    if missing:
+        # 요금이 바뀌었다는 신호다. 계산기의 고정값을 갱신해야 한다.
+        log.warning("fees: pinned rule texts missing from API: %s", missing)
+    return len(rows)
+
+
+def fee_rules_drift(payload: dict) -> list[str]:
+    """고정 요금의 근거 문구 중 API 응답에 없는 것. 비어 있으면 요금이 그대로라는 뜻."""
+    items = payload["response"]["body"]["items"]
+    if isinstance(items, dict):
+        items = items.get("item", [])
+    seen = {str(it.get("chardesc", "")).strip() for it in items}
+    return [t for t in PINNED_FEE_TEXTS if t not in seen]
+
+
+# ------------------------------------------------------------- 내 항공편
+#
+# 편명 검색은 upstream이 정확 일치만 지원하고, 실제 ID는 'KE703'(0 패딩 없음)에
+# 'KE5951Y'처럼 꼬리 문자가 붙기도 한다. 사용자가 치는 'KE0703'/'KE5951'로는 못 찾으므로
+# 전체 출발편 목록을 10분 캐시로 받아 정규화 매칭한다 — 검색당 upstream 호출도 없어진다.
+FLIGHTS_API_URL = "https://apis.data.go.kr/B551177/StatusOfPassengerFlightsOdp/getPassengerDeparturesOdp"
+
+# P02는 탑승동(concourse) — 체크인과 주차는 T1이다. 그대로 내보내면 주차할 터미널을 알 수 없다.
+FLIGHT_TERMINALS = {"P01": "T1", "P02": "T1", "P03": "T2"}
+
+import re as _re
+_FLIGHT_RE = _re.compile(r"^([A-Z]{1,3})0*(\d+)([A-Z]*)$")
+
+
+def _flight_key(s: str):
+    m = _FLIGHT_RE.match(s.upper().replace(" ", "").replace("-", ""))
+    return (m.group(1), int(m.group(2)), m.group(3)) if m else None
+
+
+def flight_search(items: list[dict], q: str) -> list[dict]:
+    qk = _flight_key(q)
+    if qk is None:
+        return []
+    out = []
+    for it in items:
+        fk = _flight_key(str(it.get("flightId", "")))
+        if fk is None:
+            continue
+        # 항공사·번호 일치. 꼬리 문자는 질의에 없으면 무시한다 (KE5951 -> KE5951Y).
+        if fk[0] == qk[0] and fk[1] == qk[1] and (not qk[2] or fk[2] == qk[2]):
+            tid = it.get("terminalId", "")
+            out.append({
+                "flightId": it.get("flightId"),
+                "airline": it.get("airline"),
+                "airport": it.get("airport"),
+                "scheduleDateTime": it.get("scheduleDateTime"),
+                "estimatedDateTime": it.get("estimatedDateTime"),
+                "remark": it.get("remark"),
+                "terminal": FLIGHT_TERMINALS.get(tid, tid),
+                "concourse": tid == "P02",
+                "gatenumber": it.get("gatenumber"),
+                "chkinrange": it.get("chkinrange"),
+                "codeshare": it.get("codeshare"),
+                "masterflightid": it.get("masterflightid"),
+            })
+    return out[:5]
+
+
+_flights_cache: tuple[float, list[dict]] | None = None
+FLIGHTS_CACHE_SECONDS = 600
+
+
+async def fetch_departures() -> list[dict]:
+    global _flights_cache
+    if _flights_cache and time.time() - _flights_cache[0] < FLIGHTS_CACHE_SECONDS:
+        return _flights_cache[1]
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            FLIGHTS_API_URL,
+            params={"serviceKey": unquote(os.environ.get("SERVICE_KEY", "")),
+                    "numOfRows": 2000, "pageNo": 1, "type": "json", "lang": "K"},
+            timeout=20,
+        )
+        r.raise_for_status()
+        body = r.json()["response"]["body"]
+        items = body.get("items", [])
+        if isinstance(items, dict):
+            items = items.get("item", [])
+    _flights_cache = (time.time(), items)
+    return items
+
+
 # ------------------------------------------------------- 셔틀 시간표
 #
 # 도착예측(getShtbArrivalPredInfo)은 쓰지 않는다 — 실측해 보니 predTimes가 전부 0이고
@@ -415,6 +570,10 @@ def _congestion_last_ts(con):
     return con.execute("SELECT MAX(ts) FROM congestion").fetchone()[0]
 
 
+def _fees_last_ts(con):
+    return con.execute("SELECT MAX(last_seen) FROM fees").fetchone()[0]
+
+
 def _passengers_last_ts(con):
     return con.execute("SELECT MAX(updated) FROM passengers").fetchone()[0]
 
@@ -426,6 +585,8 @@ SOURCES = [
     # 비교하기도 편하다. 호출은 오늘·내일 2회라 하루 576회, 한도 1,000 안이다.
     Source("passengers", COLLECT_INTERVAL_SECONDS, collect_passengers, _passengers_last_ts),
     Source("congestion", CONGESTION_INTERVAL_SECONDS, collect_congestion, _congestion_last_ts),
+    # 요금은 하루 한 번이면 충분하다 — 바뀌는 일 자체가 드물고, 목적은 변경 감지다.
+    Source("fees", 86400, collect_fees, _fees_last_ts),
 ]
 
 
@@ -652,6 +813,28 @@ def api_congestion_series(
     return [dict(r) for r in db.congestion_series(app.state.con, start, end, size)]
 
 
+@app.get("/api/fees/estimate")
+def api_fee_estimate(minutes: int = Query(ge=1, le=60 * 24 * 60)):
+    """소형차 기준 예상 요금. 근거 문구가 API에서 사라졌으면 drift에 담겨 온다."""
+    return {
+        "minutes": minutes,
+        "short": fee_estimate("단기", minutes),
+        "long": fee_estimate("장기", minutes),
+        "drift": fee_status(app.state.con),
+    }
+
+
+@app.get("/api/flight")
+async def api_flight(q: str = Query(min_length=3, max_length=10)):
+    """편명으로 오늘 출발편을 찾고, 주차 결정에 필요한 맥락을 함께 준다."""
+    try:
+        items = await fetch_departures()
+    except Exception as e:
+        _log_collect_failure(e, "flights")
+        return {"matches": [], "error": "운항 정보를 불러오지 못했습니다"}
+    return {"matches": flight_search(items, q)}
+
+
 @app.get("/api/shuttle")
 async def api_shuttle():
     """터미널 정류장 셔틀 출발 시간표. 오늘이 평일인지 휴일인지는 서버가 정한다."""
@@ -711,7 +894,9 @@ def api_health(response: Response):
     for src in SOURCES:
         last = src.last_ts(con)
         age = None if last is None else now - last
-        ok = age is not None and age <= HEALTH_STALE_AFTER_SECONDS
+        # 하루 주기 소스를 1시간 기준으로 재면 항상 stale이라 경보가 의미를 잃는다.
+        stale_after = max(HEALTH_STALE_AFTER_SECONDS, 2 * src.interval)
+        ok = age is not None and age <= stale_after
         all_ok = all_ok and ok
         sources[src.name] = {
             "status": "ok" if ok else "stale",
