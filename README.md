@@ -125,7 +125,7 @@ Portainer는 이를 자기 내부 클론 디렉터리(`/data/compose/<id>/data`)
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (61개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (65개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
@@ -141,6 +141,30 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 | `/api/holidays?from&to` | 구간에 걸친 황금연휴 |
 | `/api/export.csv?from&to` | 구간의 **원본 행** CSV. 버킷 평균이 아니다 |
 | `/api/health` | 모니터링용. 오래됐으면 HTTP 503 |
+
+## 수집 소스
+
+| 소스 | API | 주기 | 호출/일 |
+|---|---|---|---|
+| `parking` | 주차 정보 (15095047) | 5분 | 288 |
+| `passengers` | 승객 예고-출·입국장별 (15095066) | 5분 | 576 (오늘·내일 각 1회) |
+
+두 데이터셋은 트래픽 한도가 각각 1,000/일이라 서로 깎아먹지 않는다.
+
+**승객 예고**는 시간대별 예상 승객수를 게이트 단위로 준다. 필드명이 `t1eg1~4`처럼
+번호로 보이지만 실제로는 구역 이름이다 — 활용가이드 V5.0 기준으로 `t1eg1`은 T1
+입국장 **(A,B)**, `t1eg2`는 **(E,F)**, `t1eg3`은 **(C)**, `t1eg4`는 **(D)**다. 번호로
+다루면 화면의 "입국장 2번"이 실제 E·F 구역을 가리켜 공항 안내판과 어긋난다.
+
+주의할 점 두 가지. 응답에는 시간대 24행 외에 **`합계` 행이 섞여** 오므로 걸러야
+이중 계산을 피한다. 그리고 **`numOfRows`가 `totalCount`보다 작으면 데이터가 조용히
+잘린다** — 기본값 10을 쓰면 24시간 중 10시간만 온다(가이드가 명시적으로 경고한다).
+
+주차는 `INSERT OR IGNORE`(같은 관측이 재수집돼도 무시)지만 승객 예고는
+`INSERT OR REPLACE`다 — 예고는 갱신되므로 최신 값이 이겨야 한다.
+
+활용가이드 문서(`docs/*.docx`)는 공항공사 배포물이라 저장소에 포함하지 않는다.
+공공데이터포털 데이터셋 페이지에서 내려받을 수 있다.
 
 ## 수집 소스 추가하기
 

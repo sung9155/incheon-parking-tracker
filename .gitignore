@@ -3,3 +3,7 @@ __pycache__/
 .env
 data/
 .pytest_cache/
+
+# 공항공사 배포 문서 — 공개 저장소에 재배포하지 않는다
+docs/*.docx
+docs/*.pdf

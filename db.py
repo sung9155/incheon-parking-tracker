@@ -13,6 +13,20 @@ CREATE TABLE IF NOT EXISTS parking (
   capacity INTEGER NOT NULL,
   PRIMARY KEY (ts, floor)
 ) WITHOUT ROWID;
+
+-- 승객 예고. 주차와 달리 같은 (날짜, 시간대)의 값이 갱신되므로 INSERT OR REPLACE로
+-- 최신 예고가 이긴다. 게이트 단위로 저장한다 — 합계는 언제든 더하면 나오지만 게이트를
+-- 버리면 되돌릴 수 없고, 이 API도 오늘·내일치만 주므로 버린 해상도는 영영 못 찾는다.
+CREATE TABLE IF NOT EXISTS passengers (
+  adate     TEXT    NOT NULL,   -- 'YYYY-MM-DD'
+  hour      INTEGER NOT NULL,   -- 0~23
+  terminal  TEXT    NOT NULL,   -- 'T1' | 'T2'
+  direction TEXT    NOT NULL,   -- '출국' | '입국'
+  gate      TEXT    NOT NULL,   -- 공식 안내판 표기: '1'~'6', 'A·B', 'E·F', 'C', 'D', 'A', 'B'
+  expected  INTEGER NOT NULL,
+  updated   INTEGER NOT NULL,   -- 이 예고를 마지막으로 본 시각(epoch)
+  PRIMARY KEY (adate, hour, terminal, direction, gate)
+) WITHOUT ROWID;
 """
 
 
@@ -35,6 +49,26 @@ def insert_rows(con: sqlite3.Connection, rows: Iterable[tuple[int, str, int, int
 
 
 LATEST_MAX_AGE_SECONDS = 3600  # 이보다 오래된 floor는 "현재"로 취급하지 않는다
+
+
+def upsert_passengers(con: sqlite3.Connection, rows, seen_at: int) -> None:
+    """예고는 갱신된다 — REPLACE로 최신 값이 이긴다 (주차의 IGNORE와 반대)."""
+    con.executemany(
+        "INSERT OR REPLACE INTO passengers "
+        "(adate, hour, terminal, direction, gate, expected, updated) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(*r, seen_at) for r in rows],
+    )
+    con.commit()
+
+
+def passengers(con: sqlite3.Connection, first: str, last: str) -> list[sqlite3.Row]:
+    """날짜 구간의 시간대별 예고. 'YYYY-MM-DD' 문자열 비교로 충분하다."""
+    return con.execute(
+        "SELECT adate, hour, terminal, direction, gate, expected FROM passengers "
+        "WHERE adate BETWEEN ? AND ? ORDER BY adate, hour, terminal, direction, gate",
+        (first, last),
+    ).fetchall()
 
 
 def latest(con: sqlite3.Connection) -> list[sqlite3.Row]:

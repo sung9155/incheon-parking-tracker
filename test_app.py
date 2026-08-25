@@ -700,10 +700,11 @@ def test_health_reports_ok_when_collection_is_recent(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         r = client.get("/api/health")
 
-    assert r.status_code == 200
+    # 주차만 심었으므로 승객 예고는 stale이고, 따라서 전체도 stale이다.
+    assert r.status_code == 503
     body = r.json()
-    assert body["status"] == "ok"
-    assert body["age_seconds"] < 300
+    assert body["sources"]["parking"]["status"] == "ok"
+    assert body["sources"]["parking"]["age_seconds"] < 300
     assert body["floors"] == 1
     assert body["rows"] == 1
 
@@ -779,11 +780,11 @@ def test_series_reports_the_bucket_it_used(tmp_path, monkeypatch):
 def test_sources_are_declared_with_name_interval_and_collector():
     # 소스를 늘리는 일이 "리스트에 한 줄 추가"여야 한다. 루프를 복제하기 시작하면
     # 재시도 정책·로깅·종료 처리가 소스마다 갈라진다.
-    assert [s.name for s in app.SOURCES] == ["parking"]
-    parking = app.SOURCES[0]
-    assert parking.interval == 300
-    assert callable(parking.collect)
-    assert callable(parking.last_ts)
+    assert [s.name for s in app.SOURCES] == ["parking", "passengers"]
+    for src in app.SOURCES:
+        assert src.interval == 300
+        assert callable(src.collect)
+        assert callable(src.last_ts)
 
 
 def test_lifespan_starts_one_task_per_source(tmp_path, monkeypatch):
@@ -818,11 +819,13 @@ def test_health_reports_each_source_separately(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         body = client.get("/api/health").json()
 
-    assert "sources" in body
+    assert set(body["sources"]) == {"parking", "passengers"}
     assert body["sources"]["parking"]["status"] == "ok"
     assert body["sources"]["parking"]["age_seconds"] < 300
-    # 전체 상태는 소스 중 하나라도 오래됐으면 stale이어야 한다
-    assert body["status"] == "ok"
+    # 승객 예고는 한 번도 수집된 적이 없다 -> 그 소스는 stale이고,
+    # 하나라도 stale이면 전체가 stale이어야 한다.
+    assert body["sources"]["passengers"]["status"] == "stale"
+    assert body["status"] == "stale"
 
 
 def test_one_failing_source_does_not_stop_the_others(tmp_path, monkeypatch):
@@ -864,3 +867,65 @@ def test_one_failing_source_does_not_stop_the_others(tmp_path, monkeypatch):
 
     # 망가진 소스가 예외를 계속 던져도 멀쩡한 소스는 계속 돌아야 한다
     assert len(healthy_ticks) > 1, healthy_ticks
+
+
+# ------------------------------------------------------------- 승객 예고
+
+PASSENGER_SAMPLE = {"response": {"body": {"items": [
+    {"adate": "20260825", "atime": "00_01",
+     "t1eg1": "818.0", "t1eg2": "0.0", "t1eg3": "576.0", "t1eg4": "0.0", "t1egsum1": "1394.0",
+     "t1dg1": "0.0", "t1dg2": "706.0", "t1dg3": "0.0", "t1dg4": "0.0", "t1dg5": "0.0",
+     "t1dg6": "0.0", "t1dgsum1": "706.0",
+     "t2eg1": "0.0", "t2eg2": "0.0", "t2egsum1": "0.0",
+     "t2dg1": "0.0", "t2dg2": "0.0", "t2dgsum2": "0.0", "tmp1": "", "tmp2": ""},
+    # 합계 행 — 시간대가 아니므로 저장하면 이중 계산이 된다
+    {"adate": "합계", "atime": "합계",
+     "t1eg1": "1.0", "t1eg2": "0.0", "t1eg3": "0.0", "t1eg4": "0.0", "t1egsum1": "1.0",
+     "t1dg1": "0.0", "t1dg2": "0.0", "t1dg3": "0.0", "t1dg4": "0.0", "t1dg5": "0.0",
+     "t1dg6": "0.0", "t1dgsum1": "0.0",
+     "t2eg1": "0.0", "t2eg2": "0.0", "t2egsum1": "0.0",
+     "t2dg1": "0.0", "t2dg2": "0.0", "t2dgsum2": "0.0", "tmp1": "", "tmp2": ""},
+]}}}
+
+
+def test_passenger_gate_labels_follow_the_official_guide():
+    # 활용가이드 V5.0 기준. t1eg1~4는 번호가 아니라 구역 이름이다 — 번호로 저장하면
+    # 화면의 "입국장 2번"이 실제로는 E·F 구역을 가리키게 되어 공항 안내판과 어긋난다.
+    assert app.PASSENGER_FIELDS["t1eg1"] == ("T1", "입국", "A·B")
+    assert app.PASSENGER_FIELDS["t1eg2"] == ("T1", "입국", "E·F")
+    assert app.PASSENGER_FIELDS["t1eg3"] == ("T1", "입국", "C")
+    assert app.PASSENGER_FIELDS["t1eg4"] == ("T1", "입국", "D")
+    assert app.PASSENGER_FIELDS["t2eg1"] == ("T2", "입국", "A")
+    assert app.PASSENGER_FIELDS["t2eg2"] == ("T2", "입국", "B")
+    assert app.PASSENGER_FIELDS["t1dg6"] == ("T1", "출국", "6")
+    # 합계 필드는 매핑에 없어야 한다 — 게이트에서 더하면 나오는 값이고, 둘 다
+    # 저장하면 서로 어긋날 수 있다.
+    for summed in ("t1egsum1", "t1dgsum1", "t2egsum1", "t2dgsum2"):
+        assert summed not in app.PASSENGER_FIELDS
+
+
+def test_parse_passengers_skips_the_total_row():
+    rows = app.parse_passengers(PASSENGER_SAMPLE)
+
+    assert all(r[0] == "2026-08-25" for r in rows)
+    assert {r[1] for r in rows} == {0}                    # '00_01' -> 0시
+    assert len(rows) == len(app.PASSENGER_FIELDS)         # 게이트마다 한 행
+
+
+def test_parse_passengers_maps_values_to_the_right_gate():
+    by_gate = {(t, d, g): n for _, _, t, d, g, n in app.parse_passengers(PASSENGER_SAMPLE)}
+
+    assert by_gate[("T1", "입국", "A·B")] == 818
+    assert by_gate[("T1", "입국", "C")] == 576
+    assert by_gate[("T1", "출국", "2")] == 706
+    assert by_gate[("T2", "출국", "1")] == 0
+
+
+def test_parse_passengers_totals_match_the_apis_own_sums():
+    # 게이트 합이 API가 준 합계와 같아야 한다. 어긋나면 매핑이 틀린 것이다.
+    item = PASSENGER_SAMPLE["response"]["body"]["items"][0]
+    rows = app.parse_passengers(PASSENGER_SAMPLE)
+    t1_dep = sum(n for *_, t, d, g, n in [(None, None, *r[2:]) for r in rows]
+                 if t == "T1" and d == "출국")
+
+    assert t1_dep == int(float(item["t1dgsum1"]))

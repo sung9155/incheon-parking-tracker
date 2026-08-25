@@ -106,6 +106,78 @@ def group_of(floor: str) -> tuple[str, str]:
     return group
 
 
+# ------------------------------------------------------------- 승객 예고
+#
+# 활용가이드 V5.0 (2025-10-30) 기준. 필드명이 t1eg1..4처럼 번호로 보이지만 실제로는
+# 구역 이름이다 — 번호로 다루면 화면의 "입국장 2번"이 실제 E·F 구역을 가리키게 되어
+# 공항 안내판과 어긋난다.
+PASSENGER_API_URL = "https://apis.data.go.kr/B551177/passgrAnncmt/getPassgrAnncmt"
+
+PASSENGER_FIELDS: dict[str, tuple[str, str, str]] = {
+    "t1eg1": ("T1", "입국", "A·B"),
+    "t1eg2": ("T1", "입국", "E·F"),
+    "t1eg3": ("T1", "입국", "C"),
+    "t1eg4": ("T1", "입국", "D"),
+    "t1dg1": ("T1", "출국", "1"),
+    "t1dg2": ("T1", "출국", "2"),
+    "t1dg3": ("T1", "출국", "3"),
+    "t1dg4": ("T1", "출국", "4"),
+    "t1dg5": ("T1", "출국", "5"),
+    # 가이드 주석: T1 6번 출국장은 교통약자 우대 출구로 공항 예상혼잡도 대상에서 제외된다.
+    "t1dg6": ("T1", "출국", "6"),
+    "t2eg1": ("T2", "입국", "A"),
+    "t2eg2": ("T2", "입국", "B"),
+    "t2dg1": ("T2", "출국", "1"),
+    "t2dg2": ("T2", "출국", "2"),
+}
+# 합계 필드(t1egsum1 / t1dgsum1 / t2egsum1 / t2dgsum2)는 일부러 담지 않는다. 게이트에서
+# 더하면 나오는 값이고, 둘 다 저장하면 언젠가 서로 어긋난다. 참고로 T2만 접미사가
+# sum2인데 이는 API 자체의 표기 불일치다.
+
+
+def parse_passengers(payload: dict) -> list[tuple[str, int, str, str, str, int]]:
+    """(adate, hour, terminal, direction, gate, expected) 튜플들."""
+    items = payload["response"]["body"]["items"]
+    if isinstance(items, dict):
+        items = items.get("item", [])
+    out = []
+    for it in items:
+        adate, atime = it.get("adate", ""), it.get("atime", "")
+        # 응답에는 시간대 24행 외에 '합계' 행이 섞여 온다. 그대로 담으면 이중 계산이다.
+        if not adate.isdigit() or "_" not in atime:
+            continue
+        day = f"{adate[:4]}-{adate[4:6]}-{adate[6:8]}"
+        hour = int(atime.split("_")[0])
+        for field, (terminal, direction, gate) in PASSENGER_FIELDS.items():
+            out.append((day, hour, terminal, direction, gate, int(float(it[field]))))
+    return out
+
+
+async def collect_passengers(client: httpx.AsyncClient, con, key: str) -> int:
+    """오늘(selectdate=0)과 내일(=1)을 각각 받는다. 내일치가 곧 예측 화면이 된다."""
+    seen_at, total = int(time.time()), 0
+    for selectdate in (0, 1):
+        r = await client.get(
+            PASSENGER_API_URL,
+            # numOfRows가 totalCount보다 작으면 데이터가 조용히 잘린다. 가이드가 명시적으로
+            # 경고하는 부분으로, 기본값 10을 쓰면 24시간 중 10시간만 온다.
+            params={"serviceKey": key, "numOfRows": 100, "pageNo": 1,
+                    "type": "json", "selectdate": selectdate},
+            timeout=15,
+        )
+        r.raise_for_status()
+        payload = None
+        try:
+            payload = r.json()
+            rows = parse_passengers(payload)
+        except (KeyError, ValueError, TypeError):
+            log.error("passengers failed to parse response: %s", _result_msg(payload))
+            raise
+        db.upsert_passengers(con, rows, seen_at)
+        total += len(rows)
+    return total
+
+
 COLLECT_INTERVAL_SECONDS = 300
 
 
@@ -186,9 +258,16 @@ def _parking_last_ts(con):
 
 
 # 공공데이터포털은 데이터셋마다 트래픽 한도가 따로다. 소스를 늘려도 서로 깎아먹지 않는다.
+def _passengers_last_ts(con):
+    return con.execute("SELECT MAX(updated) FROM passengers").fetchone()[0]
+
+
 SOURCES = [
     Source("parking", COLLECT_INTERVAL_SECONDS, lambda c, con, k: collect_once(c, con, k),
            _parking_last_ts),
+    # 갱신 주기가 주차와 같은 5분이라 주기를 맞춘다 — 두 데이터를 같은 시각 축에서
+    # 비교하기도 편하다. 호출은 오늘·내일 2회라 하루 576회, 한도 1,000 안이다.
+    Source("passengers", COLLECT_INTERVAL_SECONDS, collect_passengers, _passengers_last_ts),
 ]
 
 
