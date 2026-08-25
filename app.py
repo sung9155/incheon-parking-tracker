@@ -178,6 +178,92 @@ async def collect_passengers(client: httpx.AsyncClient, con, key: str) -> int:
     return total
 
 
+# ------------------------------------------------------- 셔틀 시간표
+#
+# 도착예측(getShtbArrivalPredInfo)은 쓰지 않는다 — 실측해 보니 predTimes가 전부 0이고
+# 일부 행은 2023년에 멈춰 있었다. 시간표(getShtbTimeInfo)는 살아 있고 완전하다.
+# 시간표는 이력이 아니므로 DB에 쌓지 않고 메모리 캐시로 충분하다.
+SHUTTLE_API_URL = "https://apis.data.go.kr/B551177/ShtbusInfo/getShtbTimeInfo"
+
+# 활용가이드 별첨의 정류장 코드 중 여객터미널 정류장만. 같은 이름의 정류장이 둘 있는 것은
+# API가 실제로 그렇게 주는 것이다(승차 위치가 다른 물리적 정류장으로 추정되나 미확인).
+SHUTTLE_STOPS: dict[str, tuple[str, str]] = {
+    "10000150": ("T1", "제1여객터미널(8번)"),
+    "10000200": ("T1", "제1여객터미널(동)"),
+    "10000210": ("T1", "제1여객터미널(서)"),
+    "10000160": ("T2", "제2여객터미널"),
+    "10000180": ("T2", "제2여객터미널"),
+}
+
+
+def shuttle_day_type(day: date) -> int:
+    """1=평일, 2=휴일. 설날·추석은 음력이라 달력 계산으로는 못 잡는다 — holidays 패키지."""
+    if day.weekday() >= 5:
+        return 2
+    kr = holidays.country_holidays("KR", years=[day.year], language="ko")
+    name = kr.get(day)
+    if name is not None and _base_name(name) not in NOT_A_DAY_OFF:
+        return 2
+    return 1
+
+
+def shuttle_timetable(payload: dict) -> list[dict]:
+    """터미널 정류장별 출발 시각. 시간 값은 '458'처럼 자릿수가 안 채워진 것이 섞여 있어
+    문자열로 다루면 정렬이 깨진다(실데이터에서 '950'이 막차처럼 보였다). 숫자로 정규화한다.
+    """
+    items = payload["response"]["body"]["items"]
+    if isinstance(items, dict):
+        items = items.get("item", [])
+    times: dict[str, list[int]] = {}
+    for it in items:
+        sid = it.get("stopId", "")
+        if sid not in SHUTTLE_STOPS:
+            continue
+        raw = str(it.get("startTime", "")).strip()
+        if not raw.isdigit() or len(raw) > 4:
+            continue
+        times.setdefault(sid, []).append(int(raw))
+    out = []
+    for sid, ts in times.items():
+        terminal, name = SHUTTLE_STOPS[sid]
+        out.append({
+            "stop_id": sid,
+            "terminal": terminal,
+            "name": name,
+            "times": [f"{v // 100:02d}:{v % 100:02d}" for v in sorted(ts)],
+        })
+    return sorted(out, key=lambda s: (s["terminal"], s["stop_id"]))
+
+
+# 시간표는 하루 안에 바뀌지 않는다. 12시간 캐시, 실패 시 낡은 캐시라도 계속 쓴다.
+_shuttle_cache: dict[int, tuple[float, list[dict]]] = {}
+SHUTTLE_CACHE_SECONDS = 12 * 3600
+
+
+async def fetch_shuttle(day_type: int) -> list[dict]:
+    cached = _shuttle_cache.get(day_type)
+    if cached and time.time() - cached[0] < SHUTTLE_CACHE_SECONDS:
+        return cached[1]
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                SHUTTLE_API_URL,
+                # totalCount ~4,900 — numOfRows가 작으면 조용히 잘린다 (다른 API들과 동일한 함정)
+                params={"serviceKey": unquote(os.environ.get("SERVICE_KEY", "")),
+                        "numOfRows": 6000, "pageNo": 1, "type": "json", "day_type": day_type},
+                timeout=20,
+            )
+            r.raise_for_status()
+            stops = shuttle_timetable(r.json())
+    except Exception as e:
+        _log_collect_failure(e, "shuttle")
+        if cached:
+            return cached[1]        # 낡았어도 시간표는 시간표다
+        raise
+    _shuttle_cache[day_type] = (time.time(), stops)
+    return stops
+
+
 # ---------------------------------------------------- 출국장 혼잡도
 #
 # T1과 T2가 별개 API이고 게이트 체계도 다르다. T1은 게이트 1~6번을 동/서로 나누고
@@ -564,6 +650,13 @@ def api_congestion_series(
     start, end = day_range_epoch(from_value, to_value)
     size = int(bucket) if bucket.isdigit() and int(bucket) in db.BUCKETS else db.auto_bucket(start, end)
     return [dict(r) for r in db.congestion_series(app.state.con, start, end, size)]
+
+
+@app.get("/api/shuttle")
+async def api_shuttle():
+    """터미널 정류장 셔틀 출발 시간표. 오늘이 평일인지 휴일인지는 서버가 정한다."""
+    day_type = shuttle_day_type(datetime.now().date())
+    return {"day_type": day_type, "stops": await fetch_shuttle(day_type)}
 
 
 @app.get("/api/holidays")

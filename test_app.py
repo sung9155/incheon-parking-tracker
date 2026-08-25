@@ -1,6 +1,6 @@
 import pathlib
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -1087,3 +1087,56 @@ def test_congestion_series_endpoint_returns_bucketed_rows(tmp_path, monkeypatch)
     assert len(rows) == 1
     assert rows[0]["wait_minutes"] == 35.0
     assert rows[0]["gate"] == "DG3_E"
+
+
+# ------------------------------------------------------- 셔틀 시간표
+
+SHUTTLE_SAMPLE = {"response": {"body": {"items": [
+    {"stopId": "10000200", "routeId": "11100001", "dayType": "1", "oprOrd": "1",
+     "staOrd": "3", "startTime": "458"},           # 자릿수 안 채워진 04:58
+    {"stopId": "10000200", "routeId": "11100006", "dayType": "1", "oprOrd": "2",
+     "staOrd": "3", "startTime": "0510"},
+    {"stopId": "10000180", "routeId": "11100001", "dayType": "1", "oprOrd": "9",
+     "staOrd": "1", "startTime": "2415"},           # 24:15 = 익일 00:15 표기
+    {"stopId": "10000020", "routeId": "11100001", "dayType": "1", "oprOrd": "5",
+     "staOrd": "1", "startTime": "0700"},           # AICC차고지 — 터미널 아님
+    {"stopId": "3918942261", "routeId": "1000000000", "dayType": "1", "oprOrd": "0",
+     "staOrd": "0", "startTime": "9999"},           # 실데이터에 섞여 있는 쓰레기 행
+]}}}
+
+
+def test_shuttle_timetable_keeps_only_terminal_stops_sorted_numerically():
+    stops = app.shuttle_timetable(SHUTTLE_SAMPLE)
+    by_id = {s["stop_id"]: s for s in stops}
+
+    assert set(by_id) == {"10000200", "10000180"}          # 차고지·쓰레기 행 제외
+    assert by_id["10000200"]["terminal"] == "T1"
+    assert by_id["10000180"]["terminal"] == "T2"
+    # '458'이 '0510'보다 먼저 — 문자열 정렬이면 뒤집힌다
+    assert by_id["10000200"]["times"] == ["04:58", "05:10"]
+    assert by_id["10000180"]["times"] == ["24:15"]          # 익일 표기는 그대로 보여준다
+
+
+def test_shuttle_day_type_uses_the_holiday_calendar():
+    # 주말과 공휴일이 2(휴일). 설날 같은 음력 공휴일도 잡혀야 한다.
+    assert app.shuttle_day_type(date(2026, 8, 25)) == 1     # 화요일
+    assert app.shuttle_day_type(date(2026, 8, 29)) == 2     # 토요일
+    assert app.shuttle_day_type(date(2026, 2, 17)) == 2     # 설날 (화요일)
+
+
+def test_shuttle_endpoint_serves_todays_day_type(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    async def fake_fetch(day_type):
+        return [{"stop_id": "10000200", "terminal": "T1",
+                 "name": "제1여객터미널(동)", "times": ["04:58"], "_dt": day_type}]
+
+    monkeypatch.setattr(app, "fetch_shuttle", fake_fetch)
+
+    with TestClient(app.app) as client:
+        body = client.get("/api/shuttle").json()
+
+    assert body["day_type"] in (1, 2)
+    assert body["stops"][0]["times"] == ["04:58"]
+    assert body["stops"][0]["_dt"] == body["day_type"]     # 오늘의 유형으로 조회했다

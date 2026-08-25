@@ -193,6 +193,18 @@
   .gate.closed { opacity: .5; border-style: dashed; }
   .gate.closed .gate-wait { color: var(--text-secondary); font-size: 1rem; }
 
+  #shuttle { margin: 1.25rem 0; }
+  #shuttle h2 { font-size: 1rem; margin: 0 0 .2rem; }
+  #shuttle-stops { display: grid; gap: .5rem;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); }
+  .stop { border: 1px solid var(--border); border-radius: .375rem; padding: .5rem .7rem;
+    background: var(--surface); }
+  .stop-name { font-weight: 600; font-size: .9rem; }
+  .stop-next { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stop-next small { font-size: .75rem; font-weight: 400; color: var(--text-secondary); }
+  .stop-sub { font-size: .78rem; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums; }
+
   /* 두 차트를 상하로 붙여 같은 시각을 세로로 비교한다. */
   .stack-row h3 { font-size: .85rem; font-weight: 600; color: var(--text-secondary);
     margin: .8rem 0 .1rem; }
@@ -232,6 +244,12 @@
   <h2>출국장 혼잡도</h2>
   <p class="caveat" id="congestion-stamp"></p>
   <div id="congestion-gates"></div>
+</section>
+
+<section id="shuttle">
+  <h2>터미널 셔틀 시간표</h2>
+  <p class="caveat" id="shuttle-note"></p>
+  <div id="shuttle-stops"></div>
 </section>
 
 <div class="toolbar">
@@ -843,6 +861,46 @@ function gateName(id) {
   return `${m[1]}번 출국장 ${side}`;
 }
 
+// 터미널 셔틀 시간표. 도착예측 API는 죽어 있어(pred 전부 0, 2023년에 멈춘 행) 쓰지
+// 않고, 시간표에서 "다음 출발"을 계산해 보여준다. 시간표는 페이지 수명 동안 캐시한다.
+let shuttleCache = null;
+
+async function loadShuttle() {
+  shuttleCache ??= await (await fetch('/api/shuttle')).json();
+  const stops = shuttleCache.stops.filter(st => st.terminal === terminal);
+  const box = document.getElementById('shuttle-stops');
+  if (!stops.length) {
+    box.innerHTML = '';
+    document.getElementById('shuttle-note').textContent = '시간표를 불러오지 못했습니다.';
+    return;
+  }
+
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const toMin = t => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;                      // 24:15 표기는 1455분 — 자정 넘어도 뒤에 온다
+  };
+
+  box.innerHTML = stops.map(st => {
+    const upcoming = st.times.filter(t => toMin(t) >= nowMin);
+    const next = upcoming[0];
+    const gaps = st.times.slice(1).map((t, i) => toMin(t) - toMin(st.times[i]));
+    const median = gaps.length ? gaps.sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : null;
+    return `<div class="stop">
+      <div class="stop-name">${st.name}</div>
+      <div class="stop-next">${next
+        ? `${next}<small> 다음 ${upcoming.slice(1, 3).join(', ') || '—'}</small>`
+        : '오늘 운행 종료'}</div>
+      <div class="stop-sub">첫차 ${st.times[0]} · 막차 ${st.times[st.times.length - 1]}${
+        median ? ` · 배차 약 ${median}분` : ''}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('shuttle-note').textContent =
+    (shuttleCache.day_type === 2 ? '휴일' : '평일') + ' 시간표 · 무료 터미널 순환 셔틀';
+}
+
 let seriesChart, patternChart, paxChart;
 
 // 필터를 빠르게 여러 번 누르면 요청이 겹친다. 토큰을 두어 늦게 도착한 옛 응답이
@@ -1180,6 +1238,7 @@ function refreshAll() {
   renderLayout();          // 배치도는 이미 받아둔 데이터로 즉시 다시 그린다
   loadCurrent();
   loadCongestion();
+  loadShuttle();
   (activeTab() === 'series' ? loadSeries : loadPattern)();
 }
 
@@ -1234,5 +1293,6 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 setRange(7);
 loadCurrent().then(loadSeries);
 loadCongestion();
-setInterval(() => { loadCurrent(); loadCongestion(); }, 60_000);
+loadShuttle();
+setInterval(() => { loadCurrent(); loadCongestion(); loadShuttle(); }, 60_000);
 </script>
