@@ -19,10 +19,10 @@
     --occ-low: #3d8f4e;
     --occ-mid: #c9821f;
     --occ-high: #c8402f;
-    --pax-dep: rgba(90, 120, 200, 0.16);
-    --pax-arr: rgba(70, 155, 120, 0.16);
-    --pax-dep-line: rgba(90, 120, 200, 0.55);
-    --pax-arr-line: rgba(70, 155, 120, 0.55);
+    --pax-dep: rgba(200, 64, 47, 0.15);
+    --pax-arr: rgba(57, 135, 229, 0.15);
+    --pax-dep-line: rgba(200, 64, 47, 0.7);
+    --pax-arr-line: rgba(57, 135, 229, 0.7);
     /* categorical palette, fixed order — never reassigned by rank (see dataviz skill) */
     --series-1: #2a78d6; /* blue */
     --series-2: #eb6834; /* orange */
@@ -47,10 +47,10 @@
       --occ-low: #62b874;
       --occ-mid: #e0a244;
       --occ-high: #f0705c;
-      --pax-dep: rgba(130, 160, 240, 0.18);
-      --pax-arr: rgba(105, 200, 160, 0.18);
-      --pax-dep-line: rgba(130, 160, 240, 0.6);
-      --pax-arr-line: rgba(105, 200, 160, 0.6);
+      --pax-dep: rgba(240, 112, 92, 0.18);
+      --pax-arr: rgba(120, 175, 255, 0.18);
+      --pax-dep-line: rgba(240, 112, 92, 0.75);
+      --pax-arr-line: rgba(120, 175, 255, 0.75);
       --series-1: #3987e5;
       --series-2: #d95926;
       --series-3: #199e70;
@@ -454,14 +454,33 @@ function seriesColor(group) {
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 const dowColor = dow => cssVar(`--series-${(dow % PALETTE_SLOTS) + 1}`);
 
+// 상하로 붙은 두 차트가 같은 시각을 함께 짚는다. 두 차트가 같은 stamps 배열을 쓰므로
+// 인덱스가 그대로 대응한다 — 마우스를 올린 쪽이 인덱스를 기록하면 다른 쪽도 같은
+// 자리에 선을 긋는다. 세로로 정렬해 둔 이유가 이 비교이므로, 각자 놀면 반쪽이다.
+let syncedIndex = null;
+
+function setSyncedIndex(i) {
+  if (syncedIndex === i) return;
+  syncedIndex = i;
+  // 마우스가 올라간 차트는 스스로 다시 그린다. 나머지 하나만 깨워주면 된다.
+  for (const c of [seriesChart, paxChart]) c?.draw();
+}
+
 // 수직 크로스헤어: 포인터가 가리키는 X를 정확히 짚어준다 (interaction.md).
 const crosshair = {
   id: 'crosshair',
   afterDraw(chart) {
     const active = chart.tooltip?._active;
-    if (!active || !active.length) return;
+    // 이 차트에 포인터가 없어도, 짝이 되는 차트가 가리키는 자리를 같이 짚는다.
+    let x;
+    if (active && active.length) {
+      x = active[0].element.x;
+    } else if (syncedIndex !== null && chart.$stamps?.length > syncedIndex) {
+      x = chart.scales.x.getPixelForValue(syncedIndex);
+    } else {
+      return;
+    }
     const { ctx, chartArea: { top, bottom } } = chart;
-    const x = active[0].element.x;
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(x, top);
@@ -506,6 +525,12 @@ function commonLineOptions(yTitle) {
   return {
     responsive: true,
     maintainAspectRatio: false,
+    onHover(_evt, active, chart) {
+      // 실측 추이의 두 차트만 x축(=stamps)을 공유한다. 요일×시간 패턴은 24시간
+      // 축이라 인덱스가 대응하지 않으므로 동기화에 끼지 않는다.
+      if (!chart.$stamps) return;
+      setSyncedIndex(active.length ? active[0].index : null);
+    },
     onResize(chart) {
       const show = window.innerWidth > NARROW_PX;
       if (chart.options.plugins.legend.display !== show) {
@@ -942,6 +967,11 @@ function drawPaxChart(stamps, paxSeries) {
     options: o,
   });
   paxChart.$stamps = stamps;
+}
+
+// 캔버스를 벗어나면 onHover가 더 불리지 않는다. 십자선이 남지 않도록 직접 지운다.
+for (const id of ['chart-series', 'chart-pax']) {
+  document.getElementById(id).addEventListener('mouseleave', () => setSyncedIndex(null));
 }
 
 function renderHolidayJump(runs) {
