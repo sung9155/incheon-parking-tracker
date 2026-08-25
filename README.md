@@ -234,7 +234,7 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 동/서(T2는 입구 A~D)는 실질적으로 같은 줄이고, T1 게이트 12개를 작은 차트에 다 그리면
 읽히지 않는다. 이 차트의 질문은 "몇 번 출국장이 빨라지고 있나"다.
 | `/api/holidays?from&to` | 구간에 걸친 황금연휴 |
-| `/api/export.csv?from&to` | 구간의 **원본 행** CSV. 버킷 평균이 아니다 |
+| `/api/export.csv?from&to` | 구간의 **원본 행** CSV (화면에는 없음 — 백업용 API로만 유지) |
 | `/api/health` | 모니터링용. 오래됐으면 HTTP 503 |
 
 ## 수집 소스
