@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import NamedTuple
 from datetime import date, datetime, time as clock, timedelta
 from urllib.parse import unquote
 
@@ -143,7 +144,7 @@ def _result_msg(payload: dict) -> str:
         return "no resultMsg"
 
 
-def _log_collect_failure(exc: Exception) -> None:
+def _log_collect_failure(exc: Exception, source: str = "collect") -> None:
     # 이 함수는 절대 예외를 던지면 안 된다 — collect_loop의 except 안에서 호출되므로,
     # 여기서 터지면 그 예외가 루프 밖으로 새어나가 수집기 태스크가 영구히 죽는다.
     # (예: httpx.DecodingError는 httpx.HTTPError의 서브클래스이지만 .request가 안 붙은 채로
@@ -162,23 +163,45 @@ def _log_collect_failure(exc: Exception) -> None:
         pass
 
     if status is not None and url is not None:
-        log.error("collect failed: HTTP %s for %s", status, url)
+        log.error("%s failed: HTTP %s for %s", source, status, url)
     elif url is not None:
-        log.error("collect failed: %s for %s", type(exc).__name__, url)
+        log.error("%s failed: %s for %s", source, type(exc).__name__, url)
     else:
-        log.error("collect failed: %s", type(exc).__name__)
+        log.error("%s failed: %s", source, type(exc).__name__)
 
 
-async def collect_loop(con, key: str) -> None:
+class Source(NamedTuple):
+    """수집 대상 하나. 소스를 늘리는 일은 SOURCES에 한 줄 추가하는 것이어야 한다.
+
+    루프를 복제하기 시작하면 재시도 정책·로깅·종료 처리가 소스마다 갈라진다.
+    """
+    name: str
+    interval: int                       # 초
+    collect: object                     # async (client, con, key) -> 삽입 시도한 행 수
+    last_ts: object                     # (con) -> 마지막 수집 epoch 또는 None
+
+
+def _parking_last_ts(con):
+    return con.execute("SELECT MAX(ts) FROM parking").fetchone()[0]
+
+
+# 공공데이터포털은 데이터셋마다 트래픽 한도가 따로다. 소스를 늘려도 서로 깎아먹지 않는다.
+SOURCES = [
+    Source("parking", COLLECT_INTERVAL_SECONDS, lambda c, con, k: collect_once(c, con, k),
+           _parking_last_ts),
+]
+
+
+async def collect_loop(source: "Source", con, key: str) -> None:
     async with httpx.AsyncClient() as client:
         while True:
             try:
-                n = await collect_once(client, con, key)
-                log.info("collected %d rows", n)
+                n = await source.collect(client, con, key)
+                log.info("%s: collected %d rows", source.name, n)
             except Exception as e:
-                # 재시도하지 않는다. 5분 뒤 다음 틱이 온다.
-                _log_collect_failure(e)
-            await asyncio.sleep(COLLECT_INTERVAL_SECONDS)
+                # 재시도하지 않는다. 다음 틱이 온다.
+                _log_collect_failure(e, source.name)
+            await asyncio.sleep(source.interval)
 
 
 # ---------------------------------------------------------------- 날짜 · 공휴일
@@ -293,7 +316,7 @@ async def lifespan(_app: FastAPI):
     _attach_log_handler()
     con = db.connect()
     _app.state.con = con
-    task = None
+    tasks = []
     if os.environ.get("COLLECT", "1") == "1":
         # 여기서 읽는다(수집 루프 안이 아니라) — 키가 없으면 컨테이너가 바로 죽어
         # restart: unless-stopped로 눈에 띄게 한다. 루프 안에서 읽으면 수집 태스크만
@@ -307,10 +330,11 @@ async def lifespan(_app: FastAPI):
         if not raw_key:
             raise RuntimeError("SERVICE_KEY is required (set it in .env)")
         key = unquote(raw_key)
-        task = asyncio.create_task(collect_loop(con, key))
+        tasks = [asyncio.create_task(collect_loop(src, con, key)) for src in SOURCES]
     yield
-    if task is not None:
+    for task in tasks:
         task.cancel()
+    for task in tasks:
         try:
             await task
         except asyncio.CancelledError:
@@ -391,24 +415,41 @@ HEALTH_STALE_AFTER_SECONDS = 3600
 
 @app.get("/api/health")
 def api_health(response: Response):
-    """모니터링이 걸 수 있는 신호. 카드가 비는 것 말고는 수집기 사망을 알 길이 없다."""
-    row = app.state.con.execute(
-        "SELECT MAX(ts) AS last, COUNT(*) AS rows, COUNT(DISTINCT floor) AS floors FROM parking"
-    ).fetchone()
-    last, now = row["last"], int(time.time())
-    age = None if last is None else now - last
-    ok = age is not None and age <= HEALTH_STALE_AFTER_SECONDS
-    if not ok:
+    """모니터링이 걸 수 있는 신호. 카드가 비는 것 말고는 수집기 사망을 알 길이 없다.
+
+    소스마다 따로 보고한다 — 하나가 죽고 나머지가 멀쩡하면 전체를 ok로 묶어선 안 된다.
+    """
+    con, now = app.state.con, int(time.time())
+    sources, all_ok = {}, True
+    for src in SOURCES:
+        last = src.last_ts(con)
+        age = None if last is None else now - last
+        ok = age is not None and age <= HEALTH_STALE_AFTER_SECONDS
+        all_ok = all_ok and ok
+        sources[src.name] = {
+            "status": "ok" if ok else "stale",
+            "last_collect": None if last is None else datetime.fromtimestamp(last).isoformat(),
+            "age_seconds": age,
+            "interval_seconds": src.interval,
+        }
+
+    if not all_ok:
         # 200을 돌려주면 Uptime Kuma 같은 도구가 정상으로 읽는다.
         response.status_code = 503
+
+    parking = con.execute(
+        "SELECT MAX(ts) AS last, COUNT(*) AS rows, COUNT(DISTINCT floor) AS floors FROM parking"
+    ).fetchone()
     return {
-        "status": "ok" if ok else "stale",
-        "last_collect": None if last is None else datetime.fromtimestamp(last).isoformat(),
-        "age_seconds": age,
-        "rows": row["rows"],
-        "floors": row["floors"],
+        "status": "ok" if all_ok else "stale",
+        "sources": sources,
+        # 아래 셋은 기존 모니터링 설정이 참조하고 있을 수 있어 남긴다.
+        "last_collect": sources["parking"]["last_collect"],
+        "age_seconds": sources["parking"]["age_seconds"],
+        "rows": parking["rows"],
+        "floors": parking["floors"],
         # TZ가 빠지면 저장되는 모든 ts가 밀린다. 여기서 바로 확인할 수 있게 노출한다.
-        "localtime_epoch_zero": app.state.con.execute(
+        "localtime_epoch_zero": con.execute(
             "SELECT datetime(0, 'unixepoch', 'localtime')"
         ).fetchone()[0],
     }

@@ -125,7 +125,7 @@ Portainer는 이를 자기 내부 클론 디렉터리(`/data/compose/<id>/data`)
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (57개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (61개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
@@ -142,10 +142,32 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 | `/api/export.csv?from&to` | 구간의 **원본 행** CSV. 버킷 평균이 아니다 |
 | `/api/health` | 모니터링용. 오래됐으면 HTTP 503 |
 
+## 수집 소스 추가하기
+
+수집 대상은 `app.SOURCES`에 선언한다. 한 소스가 예외를 던져도 다른 소스는 계속 돈다 —
+루프가 소스마다 따로 돌기 때문이다.
+
+```python
+class Source(NamedTuple):
+    name: str          # 로그와 /api/health에 쓰인다
+    interval: int      # 초
+    collect: ...       # async (client, con, key) -> 삽입 시도한 행 수
+    last_ts: ...       # (con) -> 마지막 수집 epoch 또는 None
+```
+
+공공데이터포털은 **데이터셋마다 트래픽 한도가 따로**다. 소스를 늘려도 서로 깎아먹지
+않으니, 각 API의 갱신 주기에 맞춰 `interval`을 잡으면 된다.
+
+새 소스의 테이블은 **실제 응답을 한 번 받아본 뒤에** 만든다. 주차 API 때 문서상 9개인 줄
+알았던 구역이 실제로는 19개였고 `datetm` 형식도 문서와 달랐다 — 응답을 보기 전에 설계한
+스키마는 틀린다.
+
 ## 모니터링
 
-`/api/health`는 마지막 수집 시각, 경과 초, 행 수, 구역 수, 그리고 컨테이너의
-`datetime(0,'unixepoch','localtime')` 값을 돌려준다. 마지막 수집이 1시간을 넘으면
+`/api/health`는 **소스별로** 마지막 수집 시각과 경과 초를 돌려주고, 그 밖에 행 수,
+구역 수, 컨테이너의 `datetime(0,'unixepoch','localtime')` 값을 함께 준다. 하나가 죽고
+나머지가 멀쩡할 때 전체를 ok로 묶으면 안 되므로, **소스 중 하나라도 오래되면** 전체가
+stale이 된다. 마지막 수집이 1시간을 넘으면
 **HTTP 503**을 낸다 — 200을 돌려주면 Uptime Kuma 같은 도구가 정상으로 읽기 때문이다.
 
 이것이 수집기 사망을 알아채는 유일한 자동 신호다. Uptime Kuma나 Portainer 헬스체크에

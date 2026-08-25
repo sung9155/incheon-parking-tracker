@@ -772,3 +772,95 @@ def test_series_reports_the_bucket_it_used(tmp_path, monkeypatch):
     assert one_day.headers["X-Bucket-Seconds"] == "300"
     assert a_week.headers["X-Bucket-Seconds"] == "600"     # 자동이 10분을 고른다
     assert forced.headers["X-Bucket-Seconds"] == "1800"
+
+
+# --------------------------------------------------- 수집 소스 여러 개 다루기
+
+def test_sources_are_declared_with_name_interval_and_collector():
+    # 소스를 늘리는 일이 "리스트에 한 줄 추가"여야 한다. 루프를 복제하기 시작하면
+    # 재시도 정책·로깅·종료 처리가 소스마다 갈라진다.
+    assert [s.name for s in app.SOURCES] == ["parking"]
+    parking = app.SOURCES[0]
+    assert parking.interval == 300
+    assert callable(parking.collect)
+    assert callable(parking.last_ts)
+
+
+def test_lifespan_starts_one_task_per_source(tmp_path, monkeypatch):
+    import asyncio as aio
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setenv("SERVICE_KEY", "dummy")
+    monkeypatch.delenv("COLLECT", raising=False)
+
+    started = []
+
+    async def never_ending(client, con, key):
+        started.append(True)
+        await aio.sleep(3600)
+
+    extra = app.Source("fake", 60, never_ending, lambda con: None)
+    monkeypatch.setattr(app, "SOURCES", [app.SOURCES[0]._replace(collect=never_ending), extra])
+
+    with TestClient(app.app):
+        pass                       # 기동했다가 바로 종료 — 태스크가 깨끗이 정리돼야 한다
+
+    assert len(started) == 2
+
+
+def test_health_reports_each_source_separately(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(int(time.time()) - 60, "A", 10, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        body = client.get("/api/health").json()
+
+    assert "sources" in body
+    assert body["sources"]["parking"]["status"] == "ok"
+    assert body["sources"]["parking"]["age_seconds"] < 300
+    # 전체 상태는 소스 중 하나라도 오래됐으면 stale이어야 한다
+    assert body["status"] == "ok"
+
+
+def test_one_failing_source_does_not_stop_the_others(tmp_path, monkeypatch):
+    # 소스를 나눈 이유가 이것이다. 승객예고 API가 죽어도 주차 수집은 계속돼야 한다.
+    import asyncio as aio
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setenv("SERVICE_KEY", "dummy")
+    monkeypatch.delenv("COLLECT", raising=False)
+
+    healthy_ticks = []
+
+    async def always_fails(client, con, key):
+        raise RuntimeError("this source is broken")
+
+    async def keeps_working(client, con, key):
+        healthy_ticks.append(True)
+        await aio.sleep(0)
+        return 19
+
+    broken = app.Source("broken", 0, always_fails, lambda con: None)
+    healthy = app.Source("healthy", 0, keeps_working, lambda con: None)
+    monkeypatch.setattr(app, "SOURCES", [broken, healthy])
+
+    async def drive():
+        con = db.connect(tmp_path / "t.db")
+        tasks = [aio.create_task(app.collect_loop(s, con, "k")) for s in (broken, healthy)]
+        await aio.sleep(0.05)                 # 두 루프가 여러 틱 돌 시간
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except aio.CancelledError:
+                pass
+        con.close()
+
+    aio.run(drive())
+
+    # 망가진 소스가 예외를 계속 던져도 멀쩡한 소스는 계속 돌아야 한다
+    assert len(healthy_ticks) > 1, healthy_ticks
