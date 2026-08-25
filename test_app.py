@@ -1145,7 +1145,8 @@ def test_shuttle_endpoint_serves_todays_day_type(tmp_path, monkeypatch):
 # ------------------------------------------------------------- 주차 요금
 
 def test_fee_estimate_short_term_basic_and_increments():
-    # 공식 요금: 최초 30분 1,200원, 이후 15분당 600원(올림), 일 최대 24,000원.
+    # 공식 요금: 최초 10분 무료, 기본 30분 1,200원, 이후 15분당 600원(올림), 일 최대 24,000원.
+    assert app.fee_estimate("단기", 10) == 0             # 회차 유예
     assert app.fee_estimate("단기", 20) == 1200          # 최초 구간 안
     assert app.fee_estimate("단기", 30) == 1200
     assert app.fee_estimate("단기", 31) == 1800          # 1분 초과도 15분 단위 올림
@@ -1159,10 +1160,31 @@ def test_fee_estimate_multi_day_short_term_caps_per_day():
     assert app.fee_estimate("단기", two_days_3h) == 24000 * 2 + 7200
 
 
-def test_fee_estimate_long_term_is_daily_ceiling():
-    assert app.fee_estimate("장기", 60) == 9000            # 1시간도 1일 요금
-    assert app.fee_estimate("장기", 24 * 60) == 9000
-    assert app.fee_estimate("장기", 24 * 60 + 1) == 18000  # 하루 넘는 순간 2일
+def test_fee_estimate_long_term_is_hourly_with_daily_cap():
+    # 공식: 최초 10분 무료, 시간당 1,000원(올림), 일 최대 9,000원. 예전 구현은 "하루
+    # 단위 올림"이라 3시간에 9,000원을 물렸다 — 공식 페이지 확인으로 바로잡았다.
+    assert app.fee_estimate("장기", 10) == 0
+    assert app.fee_estimate("장기", 60) == 1000
+    assert app.fee_estimate("장기", 61) == 2000            # 시간 단위 올림
+    assert app.fee_estimate("장기", 3 * 60) == 3000
+    assert app.fee_estimate("장기", 12 * 60) == 9000       # 일 최대
+    assert app.fee_estimate("장기", 24 * 60 + 3 * 60) == 9000 + 3000
+
+
+def test_fee_estimate_cargo_is_the_only_large_vehicle_rate():
+    # 여객 주차장에는 대형 요금이 없다 — 대형은 화물터미널 요금(최초 45분 무료,
+    # 15분당 600원, 일 최대 12,000원)이다.
+    assert app.fee_estimate("화물", 45) == 0
+    assert app.fee_estimate("화물", 46) == 600
+    assert app.fee_estimate("화물", 45 + 60) == 2400       # 15분*4
+    assert app.fee_estimate("화물", 24 * 60) == 12000
+
+
+def test_fee_discount_applies_the_single_highest_rate():
+    # 공식: 중복 감면 불가, 높은 1개만. 경차(50%)이면서 저공해 3종(20%)이어도 50%.
+    assert app.fee_discounted(24000, [50, 20]) == 12000
+    assert app.fee_discounted(24000, [20]) == 19200
+    assert app.fee_discounted(24000, []) == 24000
 
 
 def test_pinned_fee_texts_exist_in_a_real_response():
@@ -1173,6 +1195,8 @@ def test_pinned_fee_texts_exist_in_a_real_response():
         {"charid": "FB00000001", "chardesc": "00:15 초과 시 600원 부과", "datetime": "x"},
         {"charid": "NF00000001", "chardesc": "일일 최대 24000원 적용", "datetime": "x"},
         {"charid": "NF00000002", "chardesc": "일일 최대 9000원 적용", "datetime": "x"},
+        {"charid": "FB00000002", "chardesc": "01:00 초과 시 1000원 부과", "datetime": "x"},
+        {"charid": "NF00000003", "chardesc": "일일 최대 12000원 적용", "datetime": "x"},
     ]}}}
 
     assert app.fee_rules_drift(sample) == []
@@ -1225,10 +1249,12 @@ def test_fee_estimate_endpoint(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
 
     with TestClient(app.app) as client:
-        body = client.get("/api/fees/estimate?minutes=180").json()
+        body = client.get("/api/fees/estimate?minutes=180&discount=compact").json()
 
-    assert body["short"] == 1200 + 600 * 10        # 3시간
-    assert body["long"] == 9000
+    assert body["short"] == (1200 + 600 * 10) // 2   # 3시간, 경차 50%
+    assert body["long"] == 3000 // 2                  # 시간당 1,000원 모델
+    assert body["cargo"] == app.fee_discounted(app.fee_estimate("화물", 180), [50])
+    assert body["discount_rate"] == 50
 
 
 # ------------------------------------------------------------- 내 항공편
@@ -1323,3 +1349,15 @@ def test_space_stats_round_trip(tmp_path):
 
     assert r["occupied"] == 536
     assert r["d7p"] == 386
+
+
+def test_fee_endpoint_compact_beats_a_lower_discount(tmp_path, monkeypatch):
+    # 경차(50%)이면서 저공해 3종(20%)을 고르면 높은 쪽만 적용돼야 한다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        b = client.get("/api/fees/estimate?minutes=180&discount=lowemission3&vehicle=compact").json()
+
+    assert b["discount_rate"] == 50
+    assert b["short"] == (1200 + 600 * 10) // 2

@@ -270,36 +270,66 @@ async def collect_spaces(client: httpx.AsyncClient, con, key: str) -> int:
 # 문구가 API 응답에 실재하는지 매일 대조한다. 문구가 사라지면 요금이 바뀐 것이다.
 FEE_API_URL = "https://apis.data.go.kr/B551177/ParkingChargeInfo/getParkingChargeInformation"
 
-# 소형차 기준 공식 요금 (2026-08 확인). 대형·화물 구역 요금은 다루지 않는다.
-FEE_SHORT_BASE_MIN, FEE_SHORT_BASE_WON = 30, 1200      # 최초 30분 1,200원
-FEE_SHORT_STEP_MIN, FEE_SHORT_STEP_WON = 15, 600       # 이후 15분당 600원
-FEE_SHORT_DAY_CAP = 24000                              # 일 최대
-FEE_LONG_DAY = 9000                                    # 장기 소형, 일 단위
+# 공식 요금 (airport.kr 주차요금 페이지, 2026-08-25 확인). 여객 주차장에 대형 요금은
+# 없다 — 단기는 승용 전용이고 장기는 차종 구분 없는 단일 요금이다. "대형"에 해당하는
+# 것은 화물터미널 요금뿐이다. 최초 무료(회차 유예)는 API 조각에는 없고 공식 페이지에만
+# 있는 규칙이라 드리프트 대조 대상이 아니다.
+# 단기·장기의 "최초 10분 무료"는 회차 유예다 — 넘기면 입차 시점부터 과금한다.
+# 화물은 문구가 "최초 45분 무료 '추가' 15분 600원"이라 무료분을 차감하고 과금한다.
+FEE_RULES = {
+    #        (유예분, 유예차감, 기본분, 기본원, 단위분, 단위원, 일최대)
+    "단기": (10, False, 30, 1200, 15, 600, 24000),
+    "장기": (10, False, 0, 0, 60, 1000, 9000),
+    "화물": (45, True, 0, 0, 15, 600, 12000),
+}
+
+# 감면 대상 → 할인율(%). 전부 공식 페이지 기준. 중복 감면 불가 — 높은 1개만 적용.
+FEE_DISCOUNTS = {
+    "none": 0,
+    "compact": 50,        # 경차
+    "disabled": 50,       # 장애인
+    "merit": 50,          # 국가유공자·5·18 민주유공자·고엽제후유의증
+    "multichild": 50,     # 다자녀 (2자녀 이상, 막내 만 18세 이하)
+    "lowemission12": 50,  # 저공해 1·2종 (전기·수소 포함)
+    "lowemission3": 20,   # 저공해 3종
+}
 
 # 위 고정값의 근거 문구. fee_rules_drift가 실제 응답과 대조한다.
+# (장기 시간당 1,000원 = FB 조각 "01:00 초과 시 1000원 부과",
+#  화물 일 최대 12,000원 = NF 조각 "일일 최대 12000원 적용")
 PINNED_FEE_TEXTS = (
     "최초 00:30 에 한해 1200원 적용",
     "00:15 초과 시 600원 부과",
+    "01:00 초과 시 1000원 부과",
     "일일 최대 24000원 적용",
     "일일 최대 9000원 적용",
+    "일일 최대 12000원 적용",
 )
 
 
 def fee_estimate(kind: str, minutes: int) -> int:
-    """소형차 기준 예상 요금. kind는 '단기' 또는 '장기'."""
-    if minutes <= 0:
+    """공식 요금 기준 예상 주차요금. kind: '단기'(승용) / '장기' / '화물'(대형)."""
+    grace, deduct, base_min, base_won, step_min, step_won, day_cap = FEE_RULES[kind]
+    if minutes <= grace:
         return 0
-    if kind == "장기":
-        return -(-minutes // (24 * 60)) * FEE_LONG_DAY          # 일 단위 올림
+    if deduct:
+        minutes -= grace
     days, rest = divmod(minutes, 24 * 60)
+    total = days * day_cap
     if rest == 0:
-        return days * FEE_SHORT_DAY_CAP
-    if rest <= FEE_SHORT_BASE_MIN:
-        partial = FEE_SHORT_BASE_WON
+        return total
+    if base_min and rest <= base_min:
+        partial = base_won
     else:
-        steps = -(-(rest - FEE_SHORT_BASE_MIN) // FEE_SHORT_STEP_MIN)   # 올림
-        partial = FEE_SHORT_BASE_WON + steps * FEE_SHORT_STEP_WON
-    return days * FEE_SHORT_DAY_CAP + min(partial, FEE_SHORT_DAY_CAP)
+        steps = -(-(rest - base_min) // step_min)          # 올림
+        partial = base_won + steps * step_won
+    return total + min(partial, day_cap)
+
+
+def fee_discounted(amount: int, rates: list[int]) -> int:
+    """중복 감면 불가 — 가장 높은 할인율 하나만 적용한다 (공식 규정)."""
+    best = max(rates, default=0)
+    return amount * (100 - best) // 100
 
 
 def fee_status(con) -> list[str]:
@@ -904,12 +934,26 @@ def api_congestion_series(
 
 
 @app.get("/api/fees/estimate")
-def api_fee_estimate(minutes: int = Query(ge=1, le=60 * 24 * 60)):
-    """소형차 기준 예상 요금. 근거 문구가 API에서 사라졌으면 drift에 담겨 온다."""
+def api_fee_estimate(
+    minutes: int = Query(ge=1, le=60 * 24 * 60),
+    discount: str = Query(default="none"),
+    vehicle: str = Query(default="normal"),
+):
+    """예상 요금. 경차는 차종이면서 50% 감면이기도 하다 — 다른 감면과 겹치면
+    공식 규정대로 가장 높은 1개만 적용한다.
+
+    근거 문구가 API에서 사라졌으면 drift에 담겨 온다.
+    """
+    rates = [FEE_DISCOUNTS.get(discount, 0)]
+    if vehicle == "compact":
+        rates.append(FEE_DISCOUNTS["compact"])
+    rate = max(rates)
     return {
         "minutes": minutes,
-        "short": fee_estimate("단기", minutes),
-        "long": fee_estimate("장기", minutes),
+        "discount_rate": rate,
+        "short": fee_discounted(fee_estimate("단기", minutes), rates),
+        "long": fee_discounted(fee_estimate("장기", minutes), rates),
+        "cargo": fee_discounted(fee_estimate("화물", minutes), rates),
         "drift": fee_status(app.state.con),
     }
 

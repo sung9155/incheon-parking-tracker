@@ -194,6 +194,10 @@
     color: var(--text-primary); background: var(--bg);
     border: 1px solid var(--border); border-radius: .3rem; text-align: right; }
   #fee-calc b { font-variant-numeric: tabular-nums; }
+  #fee-calc select { font: inherit; font-size: .85rem; padding: .2rem .3rem;
+    color: var(--text-primary); background: var(--bg);
+    border: 1px solid var(--border); border-radius: .3rem; }
+  .fee-note { display: block; font-size: .75rem; color: var(--text-secondary); margin-top: .25rem; }
 
   .term-tabs { margin: 1rem 0; }
   .term-tabs button { font-size: 1rem; padding: .5rem 1.1rem; }
@@ -276,10 +280,24 @@
 
 <div class="cards" id="cards"></div>
 
-<p id="fee-calc">주차 요금 계산 (소형차):
+<p id="fee-calc">주차 요금 계산:
   <input id="fee-days" type="number" min="0" max="60" value="3" aria-label="일"> 일
   <input id="fee-hours" type="number" min="0" max="23" value="0" aria-label="시간"> 시간
+  <select id="fee-vehicle" aria-label="차종">
+    <option value="normal" selected>승용</option>
+    <option value="compact">경차 (50% 감면)</option>
+    <option value="cargo">대형 (화물터미널)</option>
+  </select>
+  <select id="fee-discount" aria-label="감면 대상">
+    <option value="none" selected>감면 없음</option>
+    <option value="disabled">장애인 (50%)</option>
+    <option value="merit">국가유공자·5·18·고엽제 (50%)</option>
+    <option value="multichild">다자녀 — 2자녀 이상, 막내 18세 이하 (50%)</option>
+    <option value="lowemission12">저공해 1·2종 (50%)</option>
+    <option value="lowemission3">저공해 3종 (20%)</option>
+  </select>
   → <span id="fee-out"></span>
+  <span class="fee-note">중복 감면은 불가 — 높은 1개만 적용됩니다.</span>
 </p>
 
 <section id="shuttle">
@@ -1014,9 +1032,18 @@ async function updateFee() {
   const minutes = d * 1440 + h * 60;
   const out = document.getElementById('fee-out');
   if (minutes <= 0) { out.textContent = ''; return; }
-  const b = await (await fetch(`/api/fees/estimate?minutes=${minutes}`)).json();
+
+  // 경차는 차종이자 50% 감면이다. 중복 감면 불가 — 서버가 높은 1개만 적용한다.
+  const vehicle = document.getElementById('fee-vehicle').value;
+  const picked = document.getElementById('fee-discount').value;
+
+  const b = await (await fetch(
+    `/api/fees/estimate?minutes=${minutes}&discount=${picked}&vehicle=${vehicle}`)).json();
   const won = v => v.toLocaleString('ko-KR') + '원';
-  out.innerHTML = `단기 <b>${won(b.short)}</b> · 장기 <b>${won(b.long)}</b>`
+  const tag = b.discount_rate ? ` <small>(${b.discount_rate}% 감면 적용)</small>` : '';
+  out.innerHTML = (vehicle === 'cargo'
+    ? `화물터미널 <b>${won(b.cargo)}</b>`
+    : `단기 <b>${won(b.short)}</b> · 장기 <b>${won(b.long)}</b>`) + tag
     + (b.drift.length ? ' <small>(요금 기준 변경 감지 — 값이 낡았을 수 있음)</small>' : '');
 }
 
@@ -1412,6 +1439,8 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 document.getElementById('flight-form').addEventListener('submit', searchFlight);
 document.getElementById('fee-days').addEventListener('change', updateFee);
 document.getElementById('fee-hours').addEventListener('change', updateFee);
+document.getElementById('fee-vehicle').addEventListener('change', updateFee);
+document.getElementById('fee-discount').addEventListener('change', updateFee);
 updateFee();
 
 setRange(7);
