@@ -99,10 +99,20 @@ def congestion_latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def congestion_series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
+def congestion_series(con: sqlite3.Connection, start: int, end: int,
+                      bucket: int = 300) -> list[sqlite3.Row]:
+    """버킷 평균. 주차 차트와 같은 x축(같은 버킷 크기)에 얹어야 십자선 동기화가 성립한다.
+
+    wait_capped는 MAX로 올린다 — 버킷 안에 60+ 측정이 하나라도 있으면 그 평균은
+    이미 아래로 눌린 값이므로, 잘렸다는 표시가 남아야 한다.
+    """
     return con.execute(
-        "SELECT ts, terminal, gate, wait_minutes, wait_people FROM congestion "
-        "WHERE ts BETWEEN ? AND ? ORDER BY ts, terminal, gate", (start, end)
+        "SELECT (ts / ?) * ? AS ts, terminal, gate, "
+        "AVG(wait_minutes) AS wait_minutes, AVG(wait_people) AS wait_people, "
+        "MAX(wait_capped) AS wait_capped "
+        "FROM congestion WHERE ts BETWEEN ? AND ? "
+        "GROUP BY 1, terminal, gate ORDER BY 1, terminal, gate",
+        (bucket, bucket, start, end),
     ).fetchall()
 
 

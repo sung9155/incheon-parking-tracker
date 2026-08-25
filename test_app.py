@@ -1049,3 +1049,41 @@ def test_congestion_level_follows_the_official_thresholds():
     assert app.congestion_level(40) == "혼잡"
     assert app.congestion_level(59) == "혼잡"
     assert app.congestion_level(60) == "매우혼잡"
+
+
+# ------------------------------------------- 혼잡도 추이 (버킷 평균)
+
+def test_congestion_series_buckets_to_the_given_size(tmp_path):
+    # 주차 차트와 같은 x축(같은 버킷)에 얹어야 십자선 동기화가 성립한다. 3분 수집을
+    # 5분 버킷으로 평균 내면 한 버킷에 1~2개 측정이 들어간다.
+    con = db.connect(tmp_path / "t.db")
+    db.upsert_congestion(con, [
+        (0,   "T1", "DG3_E", 30, 100, 0, "00:00~24:00"),
+        (180, "T1", "DG3_E", 40, 120, 0, "00:00~24:00"),   # 같은 300초 버킷
+        (300, "T1", "DG3_E", 60, 200, 1, "00:00~24:00"),   # 다음 버킷, 60+ 측정
+    ])
+
+    rows = db.congestion_series(con, 0, 900, bucket=300)
+
+    assert [(r["ts"], r["wait_minutes"], r["wait_capped"]) for r in rows] == [
+        (0, 35.0, 0), (300, 60.0, 1)]
+
+
+def test_congestion_series_endpoint_returns_bucketed_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    base = int(datetime(2026, 8, 25, 9, 0).timestamp())
+    db.upsert_congestion(con, [
+        (base,       "T1", "DG3_E", 30, 100, 0, "00:00~24:00"),
+        (base + 180, "T1", "DG3_E", 40, 120, 0, "00:00~24:00"),
+    ])
+    con.close()
+
+    with TestClient(app.app) as client:
+        rows = client.get(
+            "/api/congestion/series?from=2026-08-25&to=2026-08-25&bucket=300").json()
+
+    assert len(rows) == 1
+    assert rows[0]["wait_minutes"] == 35.0
+    assert rows[0]["gate"] == "DG3_E"

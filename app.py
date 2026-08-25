@@ -555,6 +555,17 @@ def api_congestion():
     return out
 
 
+@app.get("/api/congestion/series")
+def api_congestion_series(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+    bucket: str = Query(default="auto"),
+):
+    start, end = day_range_epoch(from_value, to_value)
+    size = int(bucket) if bucket.isdigit() and int(bucket) in db.BUCKETS else db.auto_bucket(start, end)
+    return [dict(r) for r in db.congestion_series(app.state.con, start, end, size)]
+
+
 @app.get("/api/holidays")
 def api_holidays(
     from_value: str = Query(alias="from"),
