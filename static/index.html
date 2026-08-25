@@ -132,6 +132,8 @@
     text-align: center; font-size: .85rem; font-weight: 600;
     background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
   .away { color: var(--text-secondary); font-size: .75rem; text-align: center; margin: .3rem 0; }
+  .term-shuttle { text-align: center; font-size: .78rem; color: var(--text-secondary);
+    margin: 0 0 .5rem; font-variant-numeric: tabular-nums; }
   .axis { display: flex; justify-content: space-between; color: var(--text-secondary);
     font-size: .72rem; font-weight: 600; margin-bottom: .35rem; }
   .band { margin-bottom: .6rem; }
@@ -236,7 +238,6 @@
   <button id="tab-T2" role="tab" aria-selected="false">제2여객터미널</button>
 </div>
 
-<div class="cards" id="cards"></div>
 
 <p id="summary"></p>
 
@@ -245,6 +246,8 @@
   <p class="caveat" id="congestion-stamp"></p>
   <div id="congestion-gates"></div>
 </section>
+
+<div class="cards" id="cards"></div>
 
 <section id="shuttle">
   <h2>터미널 셔틀 시간표</h2>
@@ -296,16 +299,16 @@
   <p id="empty-note" class="hidden">이 기간에는 수집된 데이터가 없습니다.</p>
   <div class="stack">
     <div class="stack-row">
-      <h3>주차 사용률</h3>
-      <div class="chart-box"><canvas id="chart-series"></canvas></div>
-    </div>
-    <div class="stack-row">
       <h3>예상 여객 (명/시간)</h3>
       <div class="chart-box pax"><canvas id="chart-pax"></canvas></div>
     </div>
     <div class="stack-row hidden" id="row-congestion">
       <h3>출국장 대기시간 (분)</h3>
       <div class="chart-box pax"><canvas id="chart-congestion"></canvas></div>
+    </div>
+    <div class="stack-row">
+      <h3>주차 사용률</h3>
+      <div class="chart-box"><canvas id="chart-series"></canvas></div>
     </div>
   </div>
   <p id="focus-note"></p>
@@ -713,6 +716,25 @@ const LAYOUT = [
   },
 ];
 
+// 배치도 터미널 상자에 붙일 "다음 셔틀" 한 줄. API에 있는 것은 터미널 순환 셔틀뿐이라
+// (장기주차장 셔틀 노선은 API에 없다) 정류장이 실제로 있는 터미널 건물에만 붙인다.
+// T1은 정류장 이름(동/서/8번)이 실재하므로 붙이고, T2는 같은 이름의 정류장이 둘이라
+// 구분 라벨을 지어내지 않고 시각만 보여준다.
+function nextShuttleLine(term) {
+  if (!shuttleCache) return '';
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const parts = [];
+  for (const st of shuttleCache.stops.filter(st => st.terminal === term)) {
+    const next = st.times.find(t => toMin(t) >= nowMin);
+    if (!next) continue;
+    const m = /\(([^)]+)\)$/.exec(st.name);       // '제1여객터미널(동)' -> '동'
+    parts.push(m ? `${m[1]} ${next}` : next);
+  }
+  return parts.length ? `<p class="term-shuttle">셔틀 다음 출발 · ${parts.join(' · ')}</p>` : '';
+}
+
 function renderLayout() {
   const by = new Map(detailRows.map(r => [r.floor, r]));
   const pct = r => r && r.capacity ? Math.round((r.capacity - r.available) / r.capacity * 100) : null;
@@ -738,6 +760,7 @@ function renderLayout() {
       <h3>${t.title}</h3>
       <div class="terminal-top">${t.title.split(' ')[0]} 건물</div>
       <p class="away">↓ ${t.away}</p>
+      ${nextShuttleLine(t.id)}
       ${t.axis ? `<div class="axis"><span>${t.axis[0]}</span><span>${t.axis[1]}</span></div>` : ''}
       ${t.bands.map(b => `
         <div class="band ${b.access}">
@@ -899,6 +922,7 @@ async function loadShuttle() {
 
   document.getElementById('shuttle-note').textContent =
     (shuttleCache.day_type === 2 ? '휴일' : '평일') + ' 시간표 · 무료 터미널 순환 셔틀';
+  renderLayout();          // 배치도 터미널 상자의 "다음 셔틀" 줄을 채운다
 }
 
 let seriesChart, patternChart, paxChart;
