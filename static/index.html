@@ -441,7 +441,10 @@ function usedPercent(rows) {
 const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 function setRange(days) {
+  // 끝을 내일로 둔다 — 여객 예고는 내일치까지 있으므로, 오늘로 자르면 예측이
+  // 있는데도 안 보인다. days는 되돌아보는 길이다.
   const to = new Date();
+  to.setDate(to.getDate() + 1);
   const from = new Date();
   from.setDate(from.getDate() - (days - 1));
   document.getElementById('from').value = isoDate(from);
@@ -582,6 +585,37 @@ const crosshair = {
   },
 };
 Chart.register(crosshair);
+
+// 실측이 끝나고 예측이 시작되는 자리. 축이 미래(여객 예고)까지 이어지므로, 이 선이
+// 없으면 어디까지가 잰 값이고 어디부터가 예고인지 구분할 수 없다.
+const nowLine = {
+  id: 'nowLine',
+  afterDraw(chart) {
+    const stamps = chart.$stamps;
+    if (!stamps || stamps.length < 2) return;
+    const now = Date.now() / 1000;
+    if (now <= stamps[0] || now >= stamps[stamps.length - 1]) return;
+    const bucket = stamps[1] - stamps[0];
+    const idx = (now - stamps[0]) / bucket;
+    const x = chart.scales.x.getPixelForValue(idx);
+    const { ctx, chartArea: { top, bottom } } = chart;
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = cssVar('--text-secondary');
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = '600 10px system-ui, sans-serif';
+    ctx.fillStyle = cssVar('--text-secondary');
+    ctx.textAlign = 'left';
+    ctx.fillText('지금', x + 3, top + 10);
+    ctx.restore();
+  },
+};
+Chart.register(nowLine);
 
 function applyChartTheme() {
   Chart.defaults.color = cssVar('--text-secondary');
@@ -1088,10 +1122,17 @@ async function loadSeries() {
   // 축에서 통째로 빠져, 6시간 공백이 한 칸으로 압축되고 선은 매끄럽게 이어진다 —
   // 측정하지 않은 값을 측정한 것처럼 그리는 셈이다. 공공 API는 당일치만 주므로 놓친
   // 구간은 영원히 복구할 수 없고, 그렇다면 더더욱 비어 있다고 보여줘야 한다.
+  //
+  // 축의 끝은 주차 실측이 아니라 여객 "예고"가 닿는 데까지다 — 예고는 내일치까지
+  // 받아두므로, 실측 범위에 축을 잘라버리면 예측인 데이터를 과거처럼 보여주는 셈이다.
   const present = [...new Set(rows.map(r => r.ts))].sort((a, b) => a - b);
+  const paxTs = pax.filter(r => r.terminal === terminal)
+    .map(r => new Date(`${r.adate}T${String(r.hour).padStart(2, '0')}:00:00`).getTime() / 1000);
+  const axisStart = Math.min(...present.slice(0, 1), ...paxTs.slice(0, 1).length ? [Math.min(...paxTs)] : []);
+  const axisEnd = Math.max(...present.slice(-1), ...(paxTs.length ? [Math.max(...paxTs)] : []));
   const stamps = [];
-  if (present.length) {
-    for (let t = present[0]; t <= present[present.length - 1]; t += usedBucket) stamps.push(t);
+  if (Number.isFinite(axisStart) && Number.isFinite(axisEnd)) {
+    for (let t = axisStart; t <= axisEnd; t += usedBucket) stamps.push(t);
   }
 
   const byFloorTs = new Map();
