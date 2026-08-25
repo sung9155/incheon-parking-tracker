@@ -532,6 +532,29 @@ def api_passengers(
     return [dict(r) for r in db.passengers(app.state.con, from_value, to_value)]
 
 
+# 가이드 별첨의 4단계 기준. 화면에서 임의로 정하면 공항 안내와 어긋난다.
+CONGESTION_LEVELS = ((20, "원활"), (40, "보통"), (60, "혼잡"))
+
+
+def congestion_level(minutes: int) -> str:
+    for limit, name in CONGESTION_LEVELS:
+        if minutes < limit:
+            return name
+    return "매우혼잡"
+
+
+@app.get("/api/congestion")
+def api_congestion():
+    """게이트별 최신 대기 현황. 합계를 내지 않는다 — 알고 싶은 것은 '몇 번이 빠른가'다."""
+    out = []
+    for r in db.congestion_latest(app.state.con):
+        d = dict(r)
+        d["level"] = congestion_level(d["wait_minutes"])
+        d["open"] = bool(d["operating"])
+        out.append(d)
+    return out
+
+
 @app.get("/api/holidays")
 def api_holidays(
     from_value: str = Query(alias="from"),

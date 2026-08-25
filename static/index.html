@@ -170,6 +170,30 @@
   .lot .num.high { color: var(--occ-high); font-weight: 700; }
   .lot .num { min-width: 2.4rem; text-align: right; color: var(--text-secondary); }
   #layout-note { color: var(--text-secondary); font-size: .85rem; margin: 1rem 0 0; }
+
+  .term-tabs { margin: 1rem 0; }
+  .term-tabs button { font-size: 1rem; padding: .5rem 1.1rem; }
+
+  #congestion { margin: 1.25rem 0; }
+  #congestion h2 { font-size: 1rem; margin: 0 0 .2rem; }
+  #congestion-gates { display: grid; gap: .5rem;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
+  .gate { border: 1px solid var(--border); border-radius: .375rem; padding: .5rem .7rem;
+    background: var(--surface); }
+  .gate-name { font-weight: 600; font-size: .9rem; }
+  .gate-wait { font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .gate-sub { font-size: .78rem; color: var(--text-secondary); }
+  .gate.lv0 .gate-wait { color: var(--occ-low); }
+  .gate.lv1 .gate-wait { color: var(--occ-mid); }
+  .gate.lv2 .gate-wait, .gate.lv3 .gate-wait { color: var(--occ-high); }
+  .gate.closed { opacity: .5; border-style: dashed; }
+  .gate.closed .gate-wait { color: var(--text-secondary); font-size: 1rem; }
+
+  /* 두 차트를 상하로 붙여 같은 시각을 세로로 비교한다. */
+  .stack-row h3 { font-size: .85rem; font-weight: 600; color: var(--text-secondary);
+    margin: .8rem 0 .1rem; }
+  .stack-row:first-child h3 { margin-top: .4rem; }
+  .chart-box.pax { height: 11rem; }
   .num { font-variant-numeric: tabular-nums; }
 
   /* 공항 가는 차 안에서 보는 화면이다. 좁은 폭이 기본에 가깝다. */
@@ -190,13 +214,21 @@
 
 <h1>인천공항 주차 현황</h1>
 <p id="stamp"></p>
+
+<div class="tabs term-tabs" role="tablist" aria-label="터미널">
+  <button id="tab-T1" role="tab" aria-selected="true">제1여객터미널</button>
+  <button id="tab-T2" role="tab" aria-selected="false">제2여객터미널</button>
+</div>
+
 <div class="cards" id="cards"></div>
 
+<section id="congestion">
+  <h2>출국장 혼잡도</h2>
+  <p class="caveat" id="congestion-stamp"></p>
+  <div id="congestion-gates"></div>
+</section>
+
 <div class="toolbar">
-  <fieldset>
-    <legend>터미널</legend>
-    <div class="chips" id="filter-terminal"></div>
-  </fieldset>
   <fieldset>
     <legend>주차 유형</legend>
     <div class="chips" id="filter-kind"></div>
@@ -238,7 +270,16 @@
 <div id="panel-series" role="tabpanel" aria-labelledby="tab-series">
   <div id="holiday-jump"></div>
   <p id="empty-note" class="hidden">이 기간에는 수집된 데이터가 없습니다.</p>
-  <div class="chart-box"><canvas id="chart-series"></canvas></div>
+  <div class="stack">
+    <div class="stack-row">
+      <h3>주차 사용률</h3>
+      <div class="chart-box"><canvas id="chart-series"></canvas></div>
+    </div>
+    <div class="stack-row">
+      <h3>예상 여객 (명/시간)</h3>
+      <div class="chart-box pax"><canvas id="chart-pax"></canvas></div>
+    </div>
+  </div>
   <p id="focus-note"></p>
 </div>
 
@@ -264,9 +305,11 @@ const groupKey = r => `${r.terminal} ${r.kind}`;
 // --- 필터 -----------------------------------------------------------------
 // 서버는 항상 전체를 보내고, 걸러내는 일은 여기서만 한다. 행마다 terminal/kind가
 // 붙어 오므로 필터를 바꿔도 재조회가 필요 없다.
-const TERMINALS = ['T1', 'T2'];
 const KINDS = ['단기', '장기', '예약'];
-const filters = { terminal: new Set(TERMINALS), kind: new Set(KINDS) };
+// 터미널은 필터가 아니라 탭이다 — T1과 T2는 서로 겹치지 않아 동시에 볼 이유가 없고,
+// 한쪽만 보면 선 수가 절반이 되어 화면이 훨씬 읽힌다.
+let terminal = 'T1';
+const filters = { kind: new Set(KINDS) };
 
 function buildChips(containerId, values, axis, onChange) {
   document.getElementById(containerId).innerHTML = values.map(v => `
@@ -278,7 +321,7 @@ function buildChips(containerId, values, axis, onChange) {
   });
 }
 
-const passesFilter = r => filters.terminal.has(r.terminal) && filters.kind.has(r.kind);
+const passesFilter = r => r.terminal === terminal && filters.kind.has(r.kind);
 
 // 층 이름에서 화면용 짧은 라벨을 만든다. "T1 장기 P1 주차장" -> "장기 P1 주차장".
 // 터미널은 이미 필터/색으로 구분되므로 접두사를 떼어 범례를 읽을 만하게 유지한다.
@@ -443,25 +486,12 @@ function occupancyOptions(tooltipExtra) {
   o.scales.y.title.display = false;
   o.scales.y.min = 0;
   o.scales.y.max = 100;
+  o.scales.y.afterFit = sc => { sc.width = AXIS_WIDTH; };   // 아래 여객 차트와 정렬
   o.scales.y.ticks.callback = v => `${v}%`;
-  // 여객 수는 사용률과 단위가 달라 오른쪽 축을 따로 쓴다.
-  o.scales.y1 = {
-    position: 'right',
-    beginAtZero: true,
-    grid: { drawOnChartArea: false },      // 왼쪽 축 격자와 겹치면 읽기 어렵다
-    ticks: {
-      color: cssVar('--muted'),
-      callback: v => v.toLocaleString('ko-KR'),
-    },
-    title: { display: true, text: '예상 여객 (명/시간)', color: cssVar('--text-secondary') },
-  };
   o.plugins.tooltip.callbacks = {
     label: ctx => {
       const v = ctx.parsed.y;
       if (v === null) return null;
-      if (ctx.dataset.yAxisID === 'y1') {
-        return `${ctx.dataset.label}: ${Math.round(v).toLocaleString('ko-KR')}명`;
-      }
       const extra = tooltipExtra?.(ctx);
       return `${ctx.dataset.label}: ${v.toFixed(1)}%` + (extra ? ` (${extra})` : '');
     },
@@ -578,6 +608,7 @@ const occClass = u => (u === null ? '' : u >= 90 ? ' high' : u >= 70 ? ' mid' : 
 // T1 P1/P2가 동편인지 서편인지는 출처마다 달라 확인되지 않았으므로 주장하지 않는다.
 const LAYOUT = [
   {
+    id: 'T1',
     title: '제1여객터미널 (T1)',
     // 공식 안내도 기준. 터미널이 북쪽, 아래로 갈수록 남쪽. 좌=서(W), 우=동(E).
     // P1이 동편, P2가 서편이다 — 자료마다 엇갈리던 부분이라 안내도로 확정했다.
@@ -606,6 +637,7 @@ const LAYOUT = [
     ],
   },
   {
+    id: 'T2',
     title: '제2여객터미널 (T2)',
     // 공식 안내도 기준. 터미널이 남쪽, 아래로 갈수록 북쪽.
     away: '북쪽으로 멀어짐',
@@ -648,7 +680,7 @@ function renderLayout() {
     </button>`;
   };
 
-  document.getElementById('terminals').innerHTML = LAYOUT.map(t => `
+  document.getElementById('terminals').innerHTML = LAYOUT.filter(t => t.id === terminal).map(t => `
     <div class="terminal">
       <h3>${t.title}</h3>
       <div class="terminal-top">${t.title.split(' ')[0]} 건물</div>
@@ -686,7 +718,49 @@ document.getElementById('terminals').addEventListener('click', e => {
   }
 });
 
-let seriesChart, patternChart;
+// 출국장 혼잡도. 터미널마다 게이트 체계가 달라 합치지 않고 그대로 나열한다 —
+// 알고 싶은 것은 합계가 아니라 "몇 번이 빠른가"다.
+const LEVEL_CLASS = { '원활': 'lv0', '보통': 'lv1', '혼잡': 'lv2', '매우혼잡': 'lv3' };
+
+async function loadCongestion() {
+  const all = await (await fetch('/api/congestion')).json();
+  const rows = all.filter(r => r.terminal === terminal);
+  const box = document.getElementById('congestion-gates');
+
+  if (!rows.length) {
+    box.innerHTML = '';
+    document.getElementById('congestion-stamp').textContent = '아직 수집된 혼잡도가 없습니다.';
+    return;
+  }
+
+  box.innerHTML = rows.map(r => {
+    // operatingTime이 비면 그 시각 미운영이다. 0명을 '한산하다'로 읽으면 닫힌 곳으로
+    // 사람을 보내게 되므로 대기시간 대신 '미운영'을 쓴다.
+    const wait = r.open ? `${r.wait_minutes}${r.wait_capped ? '+' : ''}<small>분</small>` : '미운영';
+    return `<div class="gate ${r.open ? LEVEL_CLASS[r.level] : 'closed'}">
+      <div class="gate-name">${gateName(r.gate)}</div>
+      <div class="gate-wait">${wait}</div>
+      <div class="gate-sub">${r.open
+        ? `${r.wait_people.toLocaleString('ko-KR')}명 대기 · ${r.level}`
+        : (r.operating || '운영시간 아님')}</div>
+    </div>`;
+  }).join('');
+
+  const newest = Math.max(...rows.map(r => r.ts));
+  document.getElementById('congestion-stamp').textContent =
+    '측정: ' + new Date(newest * 1000).toLocaleString('ko-KR')
+    + ' · 20분 미만 원활 / 20~40 보통 / 40~60 혼잡 / 60분 이상 매우혼잡';
+}
+
+// DG3_E -> '3번 출국장 동편', DG1_A -> '1번 출국장 A'
+function gateName(id) {
+  const m = /^DG(\d+)_(.+)$/.exec(id);
+  if (!m) return id;
+  const side = { E: '동편', W: '서편' }[m[2]] ?? m[2];
+  return `${m[1]}번 출국장 ${side}`;
+}
+
+let seriesChart, patternChart, paxChart;
 
 // 필터를 빠르게 여러 번 누르면 요청이 겹친다. 토큰을 두어 늦게 도착한 옛 응답이
 // 최신 화면을 덮어쓰지 못하게 한다.
@@ -771,41 +845,17 @@ async function loadSeries() {
     return usedPercent(rs);
   });
 
-  // 예상 여객수를 뒤에 깐다. 출국은 주차 수요를 만들고, 입국은 세워둔 차를 빼간다 —
-  // 두 방향이 반대로 작용하므로 둘 다 보여야 곡선을 읽을 수 있다.
-  // 여객은 시간 단위 데이터라 계단으로 그린다. 5분 축에 부드러운 곡선으로 그리면
-  // 실제로 없는 해상도를 있는 것처럼 보이게 한다.
+  // 예상 여객은 별도 차트로 뺀다. 사용률(%)과 인원(명)은 단위가 달라 한 축에 겹치면
+  // 어느 쪽도 제대로 안 읽힌다. 대신 두 차트를 같은 x축으로 상하에 붙여 세로로 비교한다.
   const paxByHour = new Map();
-  for (const r of pax.filter(r => filters.terminal.has(r.terminal))) {
+  for (const r of pax.filter(r => r.terminal === terminal)) {
     const k = `${r.adate}|${r.hour}|${r.direction}`;
     paxByHour.set(k, (paxByHour.get(k) ?? 0) + r.expected);
   }
   const paxSeries = dir => stamps.map(ts => {
     const d = new Date(ts * 1000);
-    const key = `${isoDate(d)}|${d.getHours()}|${dir}`;
-    return paxByHour.get(key) ?? null;
+    return paxByHour.get(`${isoDate(d)}|${d.getHours()}|${dir}`) ?? null;
   });
-
-  for (const [dir, fill, line] of [['출국', '--pax-dep', '--pax-dep-line'],
-                                   ['입국', '--pax-arr', '--pax-arr-line']]) {
-    const data = paxSeries(dir);
-    if (!data.some(v => v !== null)) continue;
-    datasets.unshift({
-      $context: true,              // 배경 정보라 구역을 골라도 계속 남는다
-      label: `${dir} 예상 여객`,
-      data,
-      yAxisID: 'y1',
-      stepped: 'middle',
-      fill: true,
-      backgroundColor: cssVar(fill),
-      borderColor: cssVar(line),
-      borderWidth: 1,
-      pointRadius: 0,
-      pointHoverRadius: 3,
-      spanGaps: false,
-      pointStyle: 'rectRounded',
-    });
-  }
 
   if (baseline.some(v => v !== null)) {
     datasets.unshift({           // 배열 앞 = 먼저 그려져 실측선 뒤로 깔린다
@@ -844,6 +894,54 @@ async function loadSeries() {
   seriesChart.$stamps = stamps;   // 음영 플러그인이 라벨 인덱스를 찾는 데 쓴다
   seriesChart.update();
   applyFocus();                   // 다시 그려도 고른 구역은 계속 강조된 채로 남는다
+
+  drawPaxChart(stamps, paxSeries);
+}
+
+// 두 차트의 y축 라벨 폭이 다르면 플롯 영역이 어긋나 같은 시각이 세로로 안 맞는다.
+// 폭을 고정해 강제로 정렬한다.
+const AXIS_WIDTH = 58;
+
+function drawPaxChart(stamps, paxSeries) {
+  const datasets = [];
+  for (const [dir, fill, line] of [['출국', '--pax-dep', '--pax-dep-line'],
+                                   ['입국', '--pax-arr', '--pax-arr-line']]) {
+    const data = paxSeries(dir);
+    if (!data.some(v => v !== null)) continue;
+    datasets.push({
+      label: dir,
+      data,
+      stepped: 'middle',      // 시간 단위 데이터다. 매끄럽게 그리면 없는 해상도를 만든다.
+      fill: true,
+      backgroundColor: cssVar(fill),
+      borderColor: cssVar(line),
+      borderWidth: 1.5,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      spanGaps: false,
+      pointStyle: 'rectRounded',
+    });
+  }
+
+  const o = commonLineOptions('');
+  o.scales.y.title.display = false;
+  o.scales.y.beginAtZero = true;
+  o.scales.y.afterFit = sc => { sc.width = AXIS_WIDTH; };
+  o.scales.y.ticks.callback = v => v.toLocaleString('ko-KR');
+  o.scales.x.ticks.display = false;      // 위 차트가 같은 축을 이미 보여준다
+  o.plugins.legend.display = window.innerWidth > NARROW_PX;
+  o.plugins.tooltip.callbacks = {
+    label: ctx => ctx.parsed.y === null ? null
+      : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString('ko-KR')}명`,
+  };
+
+  paxChart?.destroy();
+  paxChart = new Chart(document.getElementById('chart-pax'), {
+    type: 'line',
+    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString('ko-KR')), datasets },
+    options: o,
+  });
+  paxChart.$stamps = stamps;
 }
 
 function renderHolidayJump(runs) {
@@ -927,14 +1025,27 @@ const activeTab = () =>
 function refreshAll() {
   renderLayout();          // 배치도는 이미 받아둔 데이터로 즉시 다시 그린다
   loadCurrent();
+  loadCongestion();
   (activeTab() === 'series' ? loadSeries : loadPattern)();
 }
 
 document.getElementById('tab-series').onclick = () => showTab('series');
 document.getElementById('tab-pattern').onclick = () => showTab('pattern');
 
-buildChips('filter-terminal', TERMINALS, 'terminal', refreshAll);
 buildChips('filter-kind', KINDS, 'kind', refreshAll);
+
+for (const t of ['T1', 'T2']) {
+  document.getElementById(`tab-${t}`).onclick = () => {
+    if (terminal === t) return;
+    terminal = t;
+    focusedFloor = null;        // 다른 터미널의 구역을 강조한 채로 둘 수 없다
+    for (const other of ['T1', 'T2']) {
+      document.getElementById(`tab-${other}`)
+        .setAttribute('aria-selected', String(other === t));
+    }
+    refreshAll();
+  };
+}
 
 document.getElementById('from').onchange = loadSeries;
 document.getElementById('to').onchange = loadSeries;
@@ -968,5 +1079,6 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 
 setRange(7);
 loadCurrent().then(loadSeries);
-setInterval(loadCurrent, 60_000);
+loadCongestion();
+setInterval(() => { loadCurrent(); loadCongestion(); }, 60_000);
 </script>

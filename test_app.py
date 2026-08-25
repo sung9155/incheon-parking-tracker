@@ -1018,3 +1018,34 @@ def test_congestion_round_trips_through_the_database(tmp_path):
     assert {r["gate"] for r in rows} == {"DG3_E", "DG1_E", "DG5_W"}
     busiest = max(rows, key=lambda r: r["wait_people"])
     assert busiest["gate"] == "DG5_W" and busiest["wait_capped"] == 1
+
+
+def test_congestion_endpoint_returns_latest_per_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    con = db.connect(tmp_path / "t.db")
+    db.upsert_congestion(con, [
+        (1000, "T1", "DG3_E", 20, 100, 0, "00:00~24:00"),
+        (1300, "T1", "DG3_E", 35, 170, 0, "00:00~24:00"),   # 같은 게이트의 더 최근 측정
+        (1300, "T2", "DG1_A", 9, 314, 0, "00:00~24:00"),
+    ])
+    con.close()
+
+    with TestClient(app.app) as client:
+        rows = client.get("/api/congestion").json()
+
+    by_gate = {(r["terminal"], r["gate"]): r for r in rows}
+    assert len(rows) == 2
+    assert by_gate[("T1", "DG3_E")]["wait_minutes"] == 35     # 옛 측정이 이기면 안 된다
+    assert by_gate[("T2", "DG1_A")]["wait_people"] == 314
+
+
+def test_congestion_level_follows_the_official_thresholds():
+    # 가이드 별첨: 20분 미만 원활 / 20~40 보통 / 40~60 혼잡 / 60분 이상 매우혼잡
+    assert app.congestion_level(0) == "원활"
+    assert app.congestion_level(19) == "원활"
+    assert app.congestion_level(20) == "보통"
+    assert app.congestion_level(39) == "보통"
+    assert app.congestion_level(40) == "혼잡"
+    assert app.congestion_level(59) == "혼잡"
+    assert app.congestion_level(60) == "매우혼잡"
