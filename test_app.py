@@ -780,11 +780,14 @@ def test_series_reports_the_bucket_it_used(tmp_path, monkeypatch):
 def test_sources_are_declared_with_name_interval_and_collector():
     # 소스를 늘리는 일이 "리스트에 한 줄 추가"여야 한다. 루프를 복제하기 시작하면
     # 재시도 정책·로깅·종료 처리가 소스마다 갈라진다.
-    assert [s.name for s in app.SOURCES] == ["parking", "passengers"]
+    assert [s.name for s in app.SOURCES] == ["parking", "passengers", "congestion"]
     for src in app.SOURCES:
-        assert src.interval == 300
+        assert src.interval > 0
         assert callable(src.collect)
         assert callable(src.last_ts)
+    # 혼잡도는 1~2분마다 갱신되므로 주차보다 촘촘히 받는다.
+    by_name = {s.name: s for s in app.SOURCES}
+    assert by_name["congestion"].interval < by_name["parking"].interval
 
 
 def test_lifespan_starts_one_task_per_source(tmp_path, monkeypatch):
@@ -819,7 +822,7 @@ def test_health_reports_each_source_separately(tmp_path, monkeypatch):
     with TestClient(app.app) as client:
         body = client.get("/api/health").json()
 
-    assert set(body["sources"]) == {"parking", "passengers"}
+    assert set(body["sources"]) == {"parking", "passengers", "congestion"}
     assert body["sources"]["parking"]["status"] == "ok"
     assert body["sources"]["parking"]["age_seconds"] < 300
     # 승객 예고는 한 번도 수집된 적이 없다 -> 그 소스는 stale이고,
@@ -962,3 +965,56 @@ def test_upsert_replaces_a_revised_forecast(tmp_path):
 
     assert len(rows) == 1
     assert rows[0]["expected"] == 620
+
+
+# ------------------------------------------------------- 출국장 혼잡도
+
+CONGESTION_T1 = {"response": {"body": {"items": [
+    {"gateId": "DG3_E", "terminalId": "P01", "waitTime": "33", "waitLength": "155",
+     "occurtime": "20260825101000", "operatingTime": "00:00~24:00"},
+    {"gateId": "DG1_E", "terminalId": "P01", "waitTime": "6", "waitLength": "0",
+     "occurtime": "20260825101000", "operatingTime": ""},      # 미운영
+    {"gateId": "DG5_W", "terminalId": "P01", "waitTime": "60+", "waitLength": "900",
+     "occurtime": "20260825101000", "operatingTime": "05:00~22:00"},
+]}}}
+
+
+def test_parse_congestion_reads_gate_wait_and_queue():
+    rows = app.parse_congestion(CONGESTION_T1)
+    by_gate = {r[2]: r for r in rows}
+
+    ts, terminal, gate, minutes, people, capped, operating = by_gate["DG3_E"]
+    assert terminal == "T1"
+    assert minutes == 33 and people == 155 and capped == 0
+    assert datetime.fromtimestamp(ts) == datetime(2026, 8, 25, 10, 10, 0)
+    assert operating == "00:00~24:00"
+
+
+def test_parse_congestion_marks_the_60_plus_cap():
+    # 문서상 60분을 넘으면 '60+'로만 온다. 60으로 저장하되 잘렸다는 표시를 남긴다 —
+    # 그러지 않으면 62분과 3시간이 화면에서 똑같아 보인다.
+    row = {r[2]: r for r in app.parse_congestion(CONGESTION_T1)}["DG5_W"]
+    assert row[3] == 60 and row[5] == 1
+
+
+def test_parse_congestion_flags_a_closed_gate():
+    # operatingTime이 비면 그 시각에 운영하지 않는 출국장이다. 0명을 '한산하다'로
+    # 읽으면 닫힌 곳으로 사람을 보내게 된다.
+    row = {r[2]: r for r in app.parse_congestion(CONGESTION_T1)}["DG1_E"]
+    assert row[6] == ""
+
+
+def test_terminal_ids_map_to_the_names_used_everywhere_else():
+    # 주차·승객예고는 T1/T2를 쓴다. 혼잡도만 P01/P03이면 화면에서 못 합친다.
+    assert app.TERMINAL_IDS == {"P01": "T1", "P03": "T2"}
+
+
+def test_congestion_round_trips_through_the_database(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    db.upsert_congestion(con, app.parse_congestion(CONGESTION_T1))
+
+    rows = db.congestion_latest(con)
+
+    assert {r["gate"] for r in rows} == {"DG3_E", "DG1_E", "DG5_W"}
+    busiest = max(rows, key=lambda r: r["wait_people"])
+    assert busiest["gate"] == "DG5_W" and busiest["wait_capped"] == 1

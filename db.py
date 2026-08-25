@@ -27,6 +27,18 @@ CREATE TABLE IF NOT EXISTS passengers (
   updated   INTEGER NOT NULL,   -- 이 예고를 마지막으로 본 시각(epoch)
   PRIMARY KEY (adate, hour, terminal, direction, gate)
 ) WITHOUT ROWID;
+
+-- 출국장 혼잡도. 1~2분 주기로 갱신되는 실측이라 주차처럼 시각별로 쌓는다.
+CREATE TABLE IF NOT EXISTS congestion (
+  ts           INTEGER NOT NULL,   -- occurtime(측정 시각) epoch
+  terminal     TEXT    NOT NULL,   -- 'T1' | 'T2'
+  gate         TEXT    NOT NULL,   -- T1: DG1_E..DG6_W (동/서), T2: DG1_A..DG2_D (입구)
+  wait_minutes INTEGER NOT NULL,
+  wait_people  INTEGER NOT NULL,
+  wait_capped  INTEGER NOT NULL,   -- API가 '60+'로만 줬으면 1 — 62분과 3시간이 같아 보이면 안 된다
+  operating    TEXT    NOT NULL,   -- '05:00~22:00' 등. 빈 문자열이면 그 시각 미운영
+  PRIMARY KEY (ts, terminal, gate)
+) WITHOUT ROWID;
 """
 
 
@@ -68,6 +80,29 @@ def passengers(con: sqlite3.Connection, first: str, last: str) -> list[sqlite3.R
         "SELECT adate, hour, terminal, direction, gate, expected FROM passengers "
         "WHERE adate BETWEEN ? AND ? ORDER BY adate, hour, terminal, direction, gate",
         (first, last),
+    ).fetchall()
+
+
+def upsert_congestion(con: sqlite3.Connection, rows) -> None:
+    con.executemany(
+        "INSERT OR REPLACE INTO congestion "
+        "(ts, terminal, gate, wait_minutes, wait_people, wait_capped, operating) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+
+
+def congestion_latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """게이트마다 가장 최근 측정. 터미널마다 occurtime이 달라 전역 MAX로는 한쪽만 남는다."""
+    return con.execute(
+        "SELECT MAX(ts) AS ts, terminal, gate, wait_minutes, wait_people, wait_capped, operating "
+        "FROM congestion GROUP BY terminal, gate ORDER BY terminal, gate"
+    ).fetchall()
+
+
+def congestion_series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
+    return con.execute(
+        "SELECT ts, terminal, gate, wait_minutes, wait_people FROM congestion "
+        "WHERE ts BETWEEN ? AND ? ORDER BY ts, terminal, gate", (start, end)
     ).fetchall()
 
 

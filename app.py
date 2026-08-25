@@ -178,7 +178,74 @@ async def collect_passengers(client: httpx.AsyncClient, con, key: str) -> int:
     return total
 
 
+# ---------------------------------------------------- 출국장 혼잡도
+#
+# T1과 T2가 별개 API이고 게이트 체계도 다르다. T1은 게이트 1~6번을 동/서로 나누고
+# (DG1_E/DG1_W …), T2는 출국장 1~2번을 입구 A~D로 나눈다 (DG1_A …). T2 가이드만
+# 보면 T1도 A~D인 줄 알게 된다.
+CONGESTION_APIS = (
+    ("https://apis.data.go.kr/B551177/statusOfDepartureCongestion/getDepartureCongestion", {}),
+    ("https://apis.data.go.kr/B551177/statusOfDepartureCongestionT2/getDepartureCongestionT2", {}),
+)
+
+# 응답은 P01/P03으로 오지만 주차·승객예고는 T1/T2를 쓴다. 여기서 맞춰두지 않으면
+# 화면에서 세 데이터를 같은 터미널로 묶을 수 없다.
+TERMINAL_IDS = {"P01": "T1", "P03": "T2"}
+
+
+def parse_congestion(payload: dict) -> list[tuple]:
+    """(ts, terminal, gate, wait_minutes, wait_people, wait_capped, operating)."""
+    items = payload["response"]["body"]["items"]
+    if isinstance(items, dict):
+        items = items.get("item", [])
+    out = []
+    for it in items:
+        raw = str(it.get("waitTime", "")).strip()
+        # 60분을 넘으면 '60+'로만 온다. 60으로 저장하되 잘렸다는 표시를 남긴다 —
+        # 그러지 않으면 62분과 3시간이 화면에서 똑같아 보인다.
+        capped = 1 if raw.endswith("+") else 0
+        minutes = int(raw.rstrip("+") or 0)
+        out.append((
+            int(datetime.strptime(it["occurtime"], "%Y%m%d%H%M%S").timestamp()),
+            TERMINAL_IDS.get(it.get("terminalId", ""), it.get("terminalId", "")),
+            it["gateId"],
+            minutes,
+            int(float(it.get("waitLength") or 0)),
+            capped,
+            # 빈 문자열이면 그 시각 미운영이다. 0명을 '한산하다'로 읽으면 닫힌 곳으로
+            # 사람을 보내게 된다.
+            (it.get("operatingTime") or "").strip(),
+        ))
+    return out
+
+
+async def collect_congestion(client: httpx.AsyncClient, con, key: str) -> int:
+    total = 0
+    for url, extra in CONGESTION_APIS:
+        r = await client.get(
+            url,
+            params={"serviceKey": key, "numOfRows": 100, "pageNo": 1, "type": "json", **extra},
+            timeout=15,
+        )
+        r.raise_for_status()
+        payload = None
+        try:
+            payload = r.json()
+            rows = parse_congestion(payload)
+        except (KeyError, ValueError, TypeError):
+            log.error("congestion failed to parse response: %s", _result_msg(payload))
+            raise
+        db.upsert_congestion(con, rows)
+        total += len(rows)
+    return total
+
+
 COLLECT_INTERVAL_SECONDS = 300
+
+# 혼잡도는 1~2분마다 갱신되고 대기인원은 주차보다 훨씬 빠르게 움직인다. 5분은 그
+# 해상도를 버리는 셈이고, 2분(720회/일)은 재시도 여유가 얇다. API가 두 개라 한 틱에
+# 두 번 호출하므로 각 데이터셋 기준 480회/일이 된다.
+CONGESTION_INTERVAL_SECONDS = 180
 
 
 async def collect_once(client: httpx.AsyncClient, con, key: str) -> int:
@@ -258,6 +325,10 @@ def _parking_last_ts(con):
 
 
 # 공공데이터포털은 데이터셋마다 트래픽 한도가 따로다. 소스를 늘려도 서로 깎아먹지 않는다.
+def _congestion_last_ts(con):
+    return con.execute("SELECT MAX(ts) FROM congestion").fetchone()[0]
+
+
 def _passengers_last_ts(con):
     return con.execute("SELECT MAX(updated) FROM passengers").fetchone()[0]
 
@@ -268,6 +339,7 @@ SOURCES = [
     # 갱신 주기가 주차와 같은 5분이라 주기를 맞춘다 — 두 데이터를 같은 시각 축에서
     # 비교하기도 편하다. 호출은 오늘·내일 2회라 하루 576회, 한도 1,000 안이다.
     Source("passengers", COLLECT_INTERVAL_SECONDS, collect_passengers, _passengers_last_ts),
+    Source("congestion", CONGESTION_INTERVAL_SECONDS, collect_congestion, _congestion_last_ts),
 ]
 
 
