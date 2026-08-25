@@ -401,6 +401,10 @@ const getPattern = () =>
 // 표본이 이보다 적은 요일×시간 칸은 못 믿는다. 기준선에서도 비워 둔다.
 const MIN_SAMPLES = 3;
 
+// 사용률 표시는 소수점 1자리 '내림'. 반올림이면 자리가 조금만 남아도 100%로 보인다 —
+// "100.0%"는 정말 만차일 때만 나와야 한다.
+const pct1 = v => (Math.floor(v * 10) / 10).toFixed(1);
+
 // 사용률 = (전체 - 남은) / 전체. 여러 행을 합칠 때는 비율을 평균내면 안 되고
 // 면수를 합친 뒤에 나눠야 한다 — 크기가 다른 주차장이 섞이면 결과가 달라진다.
 function usedPercent(rows) {
@@ -651,11 +655,11 @@ async function loadCurrent() {
       const cap = caps.get(k) ?? 0;
       // 게이지는 "찬 정도"를 칠한다 — 가득 찬 주차장일수록 바가 길다. 큰 숫자는
       // 남은 자리이므로, 바 옆 퍼센트도 같은 축(사용률)으로 맞춰 서로 어긋나지 않게 한다.
-      const usedPct = cap ? Math.round((cap - free) / cap * 100) : 0;
+      const usedPct = cap ? (cap - free) / cap * 100 : 0;
       return `<div class="card">${JSON.parse(k)[0]}
         <b>${Math.round(free).toLocaleString('ko-KR')}</b>
-        <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 사용 ${usedPct}%</span>
-        <span class="gauge${occClass(usedPct)}" role="img" aria-label="사용률 ${usedPct}%"><i style="width:${usedPct}%"></i></span>
+        <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 사용 ${pct1(usedPct)}%</span>
+        <span class="gauge${occClass(usedPct)}" role="img" aria-label="사용률 ${pct1(usedPct)}%"><i style="width:${usedPct}%"></i></span>
       </div>`;
     }).join('');
   // 필터와 무관하게 전체 응답 기준으로 찍는다 — 필터를 다 꺼도 수집 시각은 유효하다.
@@ -770,7 +774,7 @@ function nextShuttleLine(term) {
 
 function renderLayout() {
   const by = new Map(detailRows.map(r => [r.floor, r]));
-  const pct = r => r && r.capacity ? Math.round((r.capacity - r.available) / r.capacity * 100) : null;
+  const pct = r => r && r.capacity ? (r.capacity - r.available) / r.capacity * 100 : null;
 
   const lotButton = (f, site) => {
     const r = by.get(f);
@@ -784,7 +788,7 @@ function renderLayout() {
       <span class="lot-name">${name}</span>
       <span class="lot-sub">${sub}</span>
       <span class="gauge${occClass(u)}"><i style="width:${u ?? 0}%"></i></span>
-      <span class="num${occClass(u)}">${u === null ? '—' : u + '%'}</span>
+      <span class="num${occClass(u)}">${u === null ? '—' : pct1(u) + '%'}</span>
     </button>`;
   };
 
@@ -888,7 +892,7 @@ async function updateSummary() {
   if (shortTerm.length) {
     const cap = shortTerm.reduce((a, r) => a + r.capacity, 0);
     const free = shortTerm.reduce((a, r) => a + r.available, 0);
-    parts.push(`단기주차 <b>${Math.round((cap - free) / cap * 100)}%</b> (${free.toLocaleString('ko-KR')}면 남음)`);
+    parts.push(`단기주차 <b>${pct1((cap - free) / cap * 100)}%</b> (${free.toLocaleString('ko-KR')}면 남음)`);
   }
 
   const open = lastCongestion.filter(r => r.terminal === terminal && r.open);
