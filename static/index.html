@@ -1149,7 +1149,10 @@ async function loadSeries() {
         return r ? usedPercent([r]) : null;
       }),
       $free: stamps.map(ts => byFloorTs.get(`${floor}|${ts}`)?.available ?? null),
-      spanGaps: false,     // 수집이 끊긴 구간은 이어 그리지 않는다
+      // 한 버킷짜리 공백만 잇는다(축 단위 거리 2 = 빈 칸 1개). 실측으로 확인한 사실:
+      // 저장하는 ts는 공항 쪽 측정시각이라 갱신 지터로 5분 경계를 건너뛰면 폴을 하나도
+      // 안 놓쳐도 버킷이 빈다. 그건 아티팩트라 잇고, 10분 이상(진짜 장애)은 끊어 보인다.
+      spanGaps: 2,
       pointRadius: 0,
       pointHoverRadius: 4,
       borderWidth: 2,
