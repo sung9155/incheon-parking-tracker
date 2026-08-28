@@ -35,7 +35,7 @@
     --series-8: #e34948; /* red */
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       color-scheme: dark;
       --page: #0d0d0d;
       --surface: #1a1a19;
@@ -62,6 +62,35 @@
       --series-7: #9085e9;
       --series-8: #e66767;
     }
+  }
+  /* 수동 토글: 시스템 설정과 무관하게 다크를 강제한다. 미디어쿼리 블록과 토큰이
+     중복되는 것은 의도 — 두 경로(시스템/수동) 모두에서 완전한 팔레트가 나와야 한다. */
+  :root[data-theme="dark"] {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --holiday-shade: rgba(230, 152, 84, 0.13);
+      --occ-low: #62b874;
+      --occ-mid: #e0a244;
+      --occ-high: #f0705c;
+      --pax-dep: rgba(240, 112, 92, 0.18);
+      --pax-arr: rgba(120, 175, 255, 0.18);
+      --pax-dep-line: rgba(240, 112, 92, 0.75);
+      --pax-arr-line: rgba(120, 175, 255, 0.75);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+      --series-7: #9085e9;
+      --series-8: #e66767;
   }
   body {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -90,6 +119,14 @@
   .gauge i { display: block; height: 100%; background: var(--occ-low); border-radius: 999px; }
   .gauge.mid i { background: var(--occ-mid); }
   .gauge.high i { background: var(--occ-high); }
+
+  .masthead { display: flex; align-items: center; justify-content: space-between;
+    gap: .75rem; flex-wrap: wrap; margin: 0 0 .5rem; }
+  .masthead h1 { margin: 0; }
+  .top-controls { display: flex; gap: .4rem; }
+  #theme-btn { font: inherit; font-size: .9rem; color: var(--text-primary);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: .375rem; padding: .3rem .6rem; cursor: pointer; white-space: nowrap; }
 
   option { background: var(--surface); color: var(--text-primary); }
   select, input[type="date"] { font: inherit; color: var(--text-primary);
@@ -256,8 +293,20 @@
     .site.staff { display: none; }   /* 직원 전용이라 데이터도 없다 — 좁은 화면에선 뺀다 */
   }
 </style>
+<!-- 본문 스크립트는 문서 끝이라, 저장된 수동 테마를 첫 페인트 전에 먼저 박는다 -->
+<script>try{const th=localStorage.getItem('theme');if(th&&th!=='auto')document.documentElement.dataset.theme=th;}catch(e){}</script>
 
-<h1>인천공항 주차 현황</h1>
+<div class="masthead">
+  <h1>인천공항 주차 현황</h1>
+  <span class="top-controls">
+    <select id="lang" aria-label="Language">
+      <option value="ko">한국어</option>
+      <option value="en">English</option>
+      <option value="zh">中文</option>
+    </select>
+    <button id="theme-btn" type="button"></button>
+  </span>
+</div>
 <p id="stamp"></p>
 
 <div class="tabs term-tabs" role="tablist" aria-label="터미널">
@@ -386,6 +435,362 @@
 </section>
 
 <script>
+// --- 언어 -------------------------------------------------------------------
+// 단일 페이지에 사전 하나. 키는 한국어 원문이라, 사전에 없는 문자열은 그대로
+// 한국어로 나온다(깨지지 않고 낡을 뿐). 언어를 바꾸면 새로고침한다 — 문자열이
+// 차트·카드 곳곳에 구워져 있어 제자리 갱신보다 훨씬 값싸고 확실하다.
+// 항공사·도시명은 번역하지 않는다: 항공편 API가 lang=K/E/C를 직접 지원한다.
+let LANG = 'ko';
+try { LANG = localStorage.getItem('lang') || 'ko'; } catch (e) {}
+if (!['ko', 'en', 'zh'].includes(LANG)) LANG = 'ko';
+const LOCALE = { ko: 'ko-KR', en: 'en-US', zh: 'zh-CN' }[LANG];
+
+const TR = {
+en: {
+  '인천공항 주차 현황': 'Incheon Airport Parking',
+  '제1여객터미널': 'Terminal 1', '제2여객터미널': 'Terminal 2',
+  '편명으로 찾기 (예: KE703)': 'Find by flight no. (e.g. KE703)',
+  '항공편명': 'Flight number', '조회': 'Search',
+  '주차 요금 계산': 'Parking fee calculator',
+  '일': 'days', '시간': 'hours',
+  '승용': 'Car', '경차 (50% 감면)': 'Compact car (50% off)',
+  '대형 (화물터미널)': 'Truck (cargo terminal)',
+  '감면 없음': 'No discount', '장애인 (50%)': 'Disability (50%)',
+  '국가유공자·5·18·고엽제 (50%)': 'National merit (50%)',
+  '다자녀 — 2자녀 이상, 막내 18세 이하 (50%)': 'Multi-child family (50%)',
+  '저공해 1·2종 (50%)': 'Low-emission class 1–2 (50%)',
+  '저공해 3종 (20%)': 'Low-emission class 3 (20%)',
+  '중복 감면은 불가 — 높은 1개만 적용됩니다.': "Discounts don't stack — only the highest one applies.",
+  '출국장 혼잡도': 'Departure hall congestion',
+  '터미널 셔틀 시간표': 'Terminal shuttle timetable',
+  '주차 유형': 'Parking type', '기간': 'Period', '단위': 'Interval',
+  '자동': 'Auto', '5분': '5 min', '10분': '10 min', '30분': '30 min', '1시간': '1 hour',
+  '1일': '1d', '7일': '7d', '30일': '30d',
+  '실측 추이': 'Measured trend', '요일×시간 패턴': 'Day × hour pattern',
+  '이 기간에는 수집된 데이터가 없습니다.': 'No data collected in this period.',
+  '표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.':
+    'Some hours have few samples yet; accuracy improves as data accumulates.',
+  '예상 여객 (명/시간)': 'Expected passengers (per hour)',
+  '출국장 대기시간 (분)': 'Departure hall wait (min)',
+  '주차 사용률': 'Parking occupancy',
+  '주차장 배치': 'Parking layout',
+  '공식 안내도의 배치를 따릅니다. 각 터미널 건물이 맨 위에 있고, 아래로 내려갈수록 터미널에서 멀어집니다. 거리는 실제 축척이 아닙니다.':
+    'Follows the official map. The terminal building sits at the top; farther down means farther from the terminal. Distances are not to scale.',
+  'layout-note':
+    "Tap an area to highlight only that lot's trend in the chart.<br>In the public data P3 is followed by P5 because <strong>P4 is staff-only</strong> and excluded. Also, T1's P1·P2 and T2's tower P1·P2 are <strong>entirely different sites</strong> — typing just the number into your navigation can send you to the wrong terminal.",
+  '밝게': 'Light', '어둡게': 'Dark',
+  // 필터·구역
+  '단기': 'Short-term', '장기': 'Long-term', '예약': 'Reserved', '기타': 'Other',
+  '단기주차': 'Short-term', '화물터미널': 'Cargo terminal',
+  '단기주차장지하1층': 'Short-term B1', '단기주차장지하2층': 'Short-term B2',
+  '단기주차장지하3층': 'Short-term B3', '단기주차장지상층': 'Short-term ground',
+  '단기주차장지하M층': 'Short-term BM', '단기주차장지상1층': 'Short-term L1',
+  '단기주차장지상2층': 'Short-term L2', '단기주차장지상3층': 'Short-term L3',
+  '단기주차장지상4층': 'Short-term L4',
+  '장기 P1 주차장': 'Long-term P1 lot', '장기 P1 주차타워': 'Long-term P1 tower',
+  '장기 P2 주차장': 'Long-term P2 lot', '장기 P2 주차타워': 'Long-term P2 tower',
+  '장기 P3 주차장': 'Long-term P3 lot', 'P5 예약주차장': 'P5 reserved',
+  '장기 주차장': 'Long-term lot', '예약 주차장': 'Reserved',
+  'P1 장기주차타워': 'Long-term tower P1', 'P2 장기주차타워': 'Long-term tower P2',
+  '주차장': 'Lot', '주차타워': 'Tower', '예약주차장': 'Reserved',
+  '평소 (요일×시간 평균)': 'Typical (day × hour avg)',
+  '지금': 'Now', '데이터 없음': 'No data',
+  // 배치도
+  '제1여객터미널 (T1)': 'Terminal 1 (T1)', '제2여객터미널 (T2)': 'Terminal 2 (T2)',
+  '남쪽으로 멀어짐': 'farther south', '북쪽으로 멀어짐': 'farther north',
+  '서 W': 'W', '동 E': 'E', '남 S': 'S', '북 N': 'N',
+  '터미널 직결 · 도보': 'Connected to terminal · walk',
+  '셔틀 · 장기': 'Shuttle · long-term', '셔틀 · 예약': 'Shuttle · reserved',
+  '셔틀 · 장기 (도로 건너 북쪽)': 'Shuttle · long-term (across the road, north)',
+  '단기주차장': 'Short-term parking',
+  'P1 장기주차장': 'P1 long-term', 'P2 장기주차장': 'P2 long-term',
+  'P3 장기주차장': 'P3 long-term', 'P4 상주직원 주차장': 'P4 staff only',
+  '장기주차장 (평면)': 'Long-term (surface)', '주차타워 P1 · P2': 'Towers P1 · P2',
+  'A·C·D·H 구역, 교통센터 옆': 'Zones A·C·D·H, by the Transportation Center',
+  '서편 · 평면 + 주차타워': 'West · surface + tower',
+  '동편 · 평면 + 주차타워': 'East · surface + tower',
+  '서편 · 직원 전용 — 공개 데이터 없음': 'West · staff only — no public data',
+  '동편 · 평면만 · 카드 전용': 'East · surface only · card payment only',
+  '가장 남쪽, 예약 전용': 'Southernmost · reservation only',
+  '터미널에 바로 붙어 있음': 'Attached to the terminal',
+  '셔틀 1·2·5번 승차장': 'Shuttle stops 1·2·5',
+  '장기주차장 북쪽 끝, 셔틀 3·4번 승차장': 'North end of the long-term lot · shuttle stops 3·4',
+  '가장 북쪽, 별도 부지': 'Northernmost · separate site',
+  '셔틀 다음 출발': 'Next shuttle',
+  // 셔틀 정류장
+  '제1여객터미널(8번)': 'Terminal 1 (stop 8)', '제1여객터미널(동)': 'Terminal 1 (east)',
+  '제1여객터미널(서)': 'Terminal 1 (west)',
+  '동': 'E', '서': 'W', '8번': '#8',
+  '시간표를 불러오지 못했습니다.': "Couldn't load the timetable.",
+  '오늘 운행 종료': 'Done for today',
+  // 혼잡도
+  '원활': 'Smooth', '보통': 'Normal', '혼잡': 'Busy', '매우혼잡': 'Very busy',
+  '미운영': 'Closed', '운영시간 아님': 'Outside operating hours',
+  '아직 수집된 혼잡도가 없습니다.': 'No congestion data collected yet.',
+  // 항공편·요금
+  '출국': 'Departures', '입국': 'Arrivals',
+  '출발': 'Departs', '변경': 'now', '체크인 카운터': 'Check-in', '게이트': 'Gate',
+  '요금 기준 변경 감지 — 값이 낡았을 수 있음': 'official rates changed — values may be stale',
+  // 연휴 이름 (holidays 패키지의 한국어 이름 기준; 없으면 원문)
+  '설날': 'Seollal', '추석': 'Chuseok', '삼일절': 'March 1st', '노동절': 'Labor Day',
+  '부처님오신날': "Buddha's Birthday", '광복절': 'Liberation Day',
+  '개천절': 'Foundation Day', '한글날': 'Hangul Day', '기독탄신일': 'Christmas',
+  '신정': "New Year's Day", '어린이날': "Children's Day", '현충일': 'Memorial Day',
+  '휴일': 'Holiday', '평일': 'Weekday',
+},
+zh: {
+  '인천공항 주차 현황': '仁川机场停车实况',
+  '제1여객터미널': '第一航站楼', '제2여객터미널': '第二航站楼',
+  '편명으로 찾기 (예: KE703)': '输入航班号查询（如 KE703）',
+  '항공편명': '航班号', '조회': '查询',
+  '주차 요금 계산': '停车费计算',
+  '일': '天', '시간': '小时',
+  '승용': '小型车', '경차 (50% 감면)': '轻型车（减免50%）',
+  '대형 (화물터미널)': '大型车（货运航站楼）',
+  '감면 없음': '无减免', '장애인 (50%)': '残疾人（50%）',
+  '국가유공자·5·18·고엽제 (50%)': '国家有功者等（50%）',
+  '다자녀 — 2자녀 이상, 막내 18세 이하 (50%)': '多子女家庭（50%）',
+  '저공해 1·2종 (50%)': '低公害1·2类（50%）',
+  '저공해 3종 (20%)': '低公害3类（20%）',
+  '중복 감면은 불가 — 높은 1개만 적용됩니다.': '减免不可叠加，仅适用最高一项。',
+  '출국장 혼잡도': '出境大厅拥挤度',
+  '터미널 셔틀 시간표': '航站楼摆渡车时刻表',
+  '주차 유형': '停车类型', '기간': '期间', '단위': '间隔',
+  '자동': '自动', '5분': '5分钟', '10분': '10分钟', '30분': '30分钟', '1시간': '1小时',
+  '1일': '1天', '7일': '7天', '30일': '30天',
+  '실측 추이': '实测趋势', '요일×시간 패턴': '星期×小时规律',
+  '이 기간에는 수집된 데이터가 없습니다.': '该期间没有收集到数据。',
+  '표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.':
+    '部分时段样本不足，数据积累后会更准确。',
+  '예상 여객 (명/시간)': '预计旅客（人/小时）',
+  '출국장 대기시간 (분)': '出境大厅等待时间（分钟）',
+  '주차 사용률': '停车使用率',
+  '주차장 배치': '停车场布局',
+  '공식 안내도의 배치를 따릅니다. 각 터미널 건물이 맨 위에 있고, 아래로 내려갈수록 터미널에서 멀어집니다. 거리는 실제 축척이 아닙니다.':
+    '按官方示意图排列。航站楼位于最上方，越往下离航站楼越远。距离非实际比例。',
+  'layout-note':
+    '点击区域可在图表中仅突出该停车场的趋势。<br>公开数据中P3之后直接是P5，因为<strong>P4为员工专用</strong>，不计入统计。另外，T1的P1·P2与T2停车楼的P1·P2是<strong>完全不同的场地</strong>——导航中只输入编号可能会开到另一个航站楼。',
+  '밝게': '浅色', '어둡게': '深色',
+  '단기': '短期', '장기': '长期', '예약': '预约', '기타': '其他',
+  '단기주차': '短期停车', '화물터미널': '货运航站楼',
+  '단기주차장지하1층': '短期停车场 地下1层', '단기주차장지하2층': '短期停车场 地下2层',
+  '단기주차장지하3층': '短期停车场 地下3层', '단기주차장지상층': '短期停车场 地面层',
+  '단기주차장지하M층': '短期停车场 地下M层', '단기주차장지상1층': '短期停车场 1层',
+  '단기주차장지상2층': '短期停车场 2层', '단기주차장지상3층': '短期停车场 3层',
+  '단기주차장지상4층': '短期停车场 4层',
+  '장기 P1 주차장': '长期P1停车场', '장기 P1 주차타워': '长期P1停车楼',
+  '장기 P2 주차장': '长期P2停车场', '장기 P2 주차타워': '长期P2停车楼',
+  '장기 P3 주차장': '长期P3停车场', 'P5 예약주차장': 'P5预约停车场',
+  '장기 주차장': '长期停车场', '예약 주차장': '预约停车场',
+  'P1 장기주차타워': '长期停车楼P1', 'P2 장기주차타워': '长期停车楼P2',
+  '주차장': '露天', '주차타워': '停车楼', '예약주차장': '预约停车场',
+  '평소 (요일×시간 평균)': '平时（星期×小时平均）',
+  '지금': '现在', '데이터 없음': '无数据',
+  '제1여객터미널 (T1)': '第一航站楼 (T1)', '제2여객터미널 (T2)': '第二航站楼 (T2)',
+  '남쪽으로 멀어짐': '向南渐远', '북쪽으로 멀어짐': '向北渐远',
+  '서 W': '西 W', '동 E': '东 E', '남 S': '南 S', '북 N': '北 N',
+  '터미널 직결 · 도보': '直连航站楼 · 步行',
+  '셔틀 · 장기': '摆渡车 · 长期', '셔틀 · 예약': '摆渡车 · 预约',
+  '셔틀 · 장기 (도로 건너 북쪽)': '摆渡车 · 长期（马路对面北侧）',
+  '단기주차장': '短期停车场',
+  'P1 장기주차장': 'P1长期停车场', 'P2 장기주차장': 'P2长期停车场',
+  'P3 장기주차장': 'P3长期停车场', 'P4 상주직원 주차장': 'P4员工专用',
+  '장기주차장 (평면)': '长期停车场（露天）', '주차타워 P1 · P2': '停车楼 P1 · P2',
+  'A·C·D·H 구역, 교통센터 옆': 'A·C·D·H区，交通中心旁',
+  '서편 · 평면 + 주차타워': '西侧 · 露天+停车楼',
+  '동편 · 평면 + 주차타워': '东侧 · 露天+停车楼',
+  '서편 · 직원 전용 — 공개 데이터 없음': '西侧 · 员工专用 — 无公开数据',
+  '동편 · 평면만 · 카드 전용': '东侧 · 仅露天 · 仅限刷卡',
+  '가장 남쪽, 예약 전용': '最南端，仅限预约',
+  '터미널에 바로 붙어 있음': '紧邻航站楼',
+  '셔틀 1·2·5번 승차장': '摆渡车1·2·5号乘车点',
+  '장기주차장 북쪽 끝, 셔틀 3·4번 승차장': '长期停车场最北端，摆渡车3·4号乘车点',
+  '가장 북쪽, 별도 부지': '最北端，独立场地',
+  '셔틀 다음 출발': '摆渡车下一班',
+  '제1여객터미널(8번)': '第一航站楼（8号）', '제1여객터미널(동)': '第一航站楼（东）',
+  '제1여객터미널(서)': '第一航站楼（西）',
+  '동': '东', '서': '西', '8번': '8号',
+  '시간표를 불러오지 못했습니다.': '时刻表加载失败。',
+  '오늘 운행 종료': '今日运营结束',
+  '원활': '顺畅', '보통': '一般', '혼잡': '拥挤', '매우혼잡': '非常拥挤',
+  '미운영': '未运营', '운영시간 아님': '非运营时间',
+  '아직 수집된 혼잡도가 없습니다.': '尚未收集到拥挤度数据。',
+  '출국': '出境', '입국': '入境',
+  '출발': '出发', '변경': '变更', '체크인 카운터': '值机柜台', '게이트': '登机口',
+  '요금 기준 변경 감지 — 값이 낡았을 수 있음': '检测到官方费率变更 — 数值可能已过时',
+  '설날': '春节', '추석': '中秋节', '삼일절': '三一节', '노동절': '劳动节',
+  '부처님오신날': '佛诞日', '광복절': '光复节',
+  '개천절': '开天节', '한글날': '韩文日', '기독탄신일': '圣诞节',
+  '신정': '元旦', '어린이날': '儿童节', '현충일': '显忠日',
+  '휴일': '节假日', '평일': '工作日',
+},
+};
+// t는 화살표 함수 인자로 곳곳에서 쓰인다(시각 문자열 등) — 충돌하지 않게 tr.
+const tr = s => (TR[LANG] && TR[LANG][s]) || s;
+
+// 어순이 언어마다 달라 조각 번역으로는 안 되는 문장들. 언어별 함수 하나로 만든다.
+const FMT = ({
+ko: {
+  updated: d => `갱신: ${d}`,
+  congStamp: d => `측정: ${d} · 20분 미만 원활 / 20~40 보통 / 40~60 혼잡 / 60분 이상 매우혼잡`,
+  wait: (m, capped) => `${m}${capped ? '+' : ''}<small>분</small>`,
+  waiting: (n, level) => `${n}명 대기 · ${level}`,
+  minSuffix: '분', peopleSuffix: '명',
+  cardSub: (cap, pct) => `전체 ${cap}면 · 사용 ${pct}%`,
+  occAria: pct => `사용률 ${pct}%`,
+  slots: (parked, cap) => `${parked} / ${cap}면`,
+  spacesLeft: n => `${n}면 남음`,
+  avgSpacesLeft: n => `평균 ${n}면 남음`,
+  summaryShort: (pct, free) => `단기주차 <b>${pct}%</b> (${free}면 남음)`,
+  summaryWait: (w, gate) => `출국장 최대 대기 <b>${w}분</b> (${gate})`,
+  summaryPeak: (h1, h2) => `오늘 출국 피크 <b>${h1}~${h2}시</b>`,
+  summaryNow: term => `지금 ${term} · `,
+  hall: (n, side) => `${n}번 출국장 ${side}`,
+  hallSide: { E: '동편', W: '서편' },
+  hallShort: h => `${h}번 출국장`,
+  hour: h => `${h}시`,
+  holiday: (name, days) => `${name} ${days}일`,
+  shuttleNext: (next, up) => `${next}<small> 다음 ${up}</small>`,
+  shuttleSub: (f, l, m) => `첫차 ${f} · 막차 ${l}${m ? ` · 배차 약 ${m}분` : ''}`,
+  shuttleNote: hol => `${hol ? '휴일' : '평일'} 시간표 · 무료 터미널 순환 셔틀`,
+  building: id => `${id === 'T1' ? '제1여객터미널' : '제2여객터미널'} 건물`,
+  flightNone: q => `오늘 출발편에서 '${q}'를 찾지 못했습니다.`,
+  flightDest: a => `${a}행`,
+  concourse: ' (탑승동 — 체크인·주차는 T1)',
+  codeshare: id => `공동운항(실제 ${id})`,
+  arriveBy: t2 => `권장 공항 도착 <b>${t2}</b> (출발 3시간 전 기준)`,
+  paxAt: n => ` · 그 시각 예상 출국 ${n}명`,
+  won: v => `${v.toLocaleString(LOCALE)}원`,
+  discountApplied: r => `${r}% 감면 적용`,
+  focusNote: name => `${name} 만 표시 중 — 배치도에서 같은 구역을 다시 누르면 전체로 돌아갑니다.`,
+},
+en: {
+  updated: d => `Updated: ${d}`,
+  congStamp: d => `Measured: ${d} · under 20 min smooth / 20–40 normal / 40–60 busy / 60+ very busy`,
+  wait: (m, capped) => `${m}${capped ? '+' : ''}<small> min</small>`,
+  waiting: (n, level) => `${n} waiting · ${level}`,
+  minSuffix: ' min', peopleSuffix: ' pax',
+  cardSub: (cap, pct) => `${cap} total · ${pct}% full`,
+  occAria: pct => `${pct}% full`,
+  slots: (parked, cap) => `${parked} / ${cap}`,
+  spacesLeft: n => `${n} left`,
+  avgSpacesLeft: n => `avg ${n} left`,
+  summaryShort: (pct, free) => `Short-term <b>${pct}%</b> full (${free} left)`,
+  summaryWait: (w, gate) => `longest departure wait <b>${w} min</b> (${gate})`,
+  summaryPeak: (h1, h2) => `today's departure peak <b>${h1}:00–${h2}:00</b>`,
+  summaryNow: term => `Now at ${term} · `,
+  hall: (n, side) => `Entrance ${n} ${side}`,
+  hallSide: { E: 'East', W: 'West' },
+  hallShort: h => `Entrance ${h}`,
+  hour: h => `${h}:00`,
+  holiday: (name, days) => `${name} ${days}d`,
+  shuttleNext: (next, up) => `${next}<small> then ${up}</small>`,
+  shuttleSub: (f, l, m) => `First ${f} · last ${l}${m ? ` · every ~${m} min` : ''}`,
+  shuttleNote: hol => `${hol ? 'Holiday' : 'Weekday'} timetable · free terminal loop shuttle`,
+  building: id => `${id === 'T1' ? 'Terminal 1' : 'Terminal 2'} building`,
+  flightNone: q => `No departure today matching '${q}'.`,
+  flightDest: a => `to ${a}`,
+  concourse: ' (Concourse — check-in & parking at T1)',
+  codeshare: id => `codeshare (operated as ${id})`,
+  arriveBy: t2 => `Arrive at the airport by <b>${t2}</b> (3 h before departure)`,
+  paxAt: n => ` · ~${n} departing passengers that hour`,
+  won: v => `₩${v.toLocaleString('en-US')}`,
+  discountApplied: r => `${r}% discount applied`,
+  focusNote: name => `Showing only ${name} — tap the same area in the layout again to show all.`,
+},
+zh: {
+  updated: d => `更新：${d}`,
+  congStamp: d => `测量：${d} · 20分钟以内顺畅 / 20~40一般 / 40~60拥挤 / 60分钟以上非常拥挤`,
+  wait: (m, capped) => `${m}${capped ? '+' : ''}<small>分钟</small>`,
+  waiting: (n, level) => `${n}人等待 · ${level}`,
+  minSuffix: '分钟', peopleSuffix: '人',
+  cardSub: (cap, pct) => `共${cap}个车位 · 已用${pct}%`,
+  occAria: pct => `使用率${pct}%`,
+  slots: (parked, cap) => `${parked} / ${cap}`,
+  spacesLeft: n => `剩余${n}个`,
+  avgSpacesLeft: n => `平均剩余${n}个`,
+  summaryShort: (pct, free) => `短期停车 <b>${pct}%</b>（剩余${free}个）`,
+  summaryWait: (w, gate) => `出境最长等待 <b>${w}分钟</b>（${gate}）`,
+  summaryPeak: (h1, h2) => `今日出境高峰 <b>${h1}~${h2}时</b>`,
+  summaryNow: term => `当前 ${term} · `,
+  hall: (n, side) => `${n}号出境口${side}`,
+  hallSide: { E: '东侧', W: '西侧' },
+  hallShort: h => `${h}号出境口`,
+  hour: h => `${h}时`,
+  holiday: (name, days) => `${name} ${days}天`,
+  shuttleNext: (next, up) => `${next}<small> 随后 ${up}</small>`,
+  shuttleSub: (f, l, m) => `首班${f} · 末班${l}${m ? ` · 约每${m}分钟一班` : ''}`,
+  shuttleNote: hol => `${hol ? '节假日' : '工作日'}时刻表 · 免费航站楼循环摆渡车`,
+  building: id => `${id === 'T1' ? '第一航站楼' : '第二航站楼'}`,
+  flightNone: q => `今日出发航班中未找到"${q}"。`,
+  flightDest: a => `飞往${a}`,
+  concourse: '（登机楼 — 值机·停车在T1）',
+  codeshare: id => `共享航班（实际为 ${id}）`,
+  arriveBy: t2 => `建议 <b>${t2}</b> 前到达机场（起飞前3小时）`,
+  paxAt: n => ` · 该时段预计出境${n}人`,
+  won: v => `₩${v.toLocaleString('zh-CN')}`,
+  discountApplied: r => `已适用${r}%减免`,
+  focusNote: name => `仅显示 ${name} — 在布局图中再次点击同一区域即可恢复全部。`,
+},
+})[LANG];
+
+// 정적 마크업은 한국어로 쓰여 있다. 언어가 다르면 로드 시 한 번 바꿔치운다 —
+// 마크업을 언어별로 3벌 두는 것보다 사전 하나가 덜 썩는다.
+function applyStaticI18n() {
+  document.documentElement.lang = { ko: 'ko', en: 'en', zh: 'zh-CN' }[LANG];
+  if (LANG === 'ko') return;
+  document.title = tr('인천공항 주차 현황');
+  const set = (sel, key) => {
+    const el = document.querySelector(sel);
+    if (el) el.textContent = tr(key);
+  };
+  set('.masthead h1', '인천공항 주차 현황');
+  set('#tab-T1', '제1여객터미널');
+  set('#tab-T2', '제2여객터미널');
+  const fq = document.getElementById('flight-q');
+  fq.placeholder = tr('편명으로 찾기 (예: KE703)');
+  fq.setAttribute('aria-label', tr('항공편명'));
+  set('#flight-form button', '조회');
+  set('.fee-title', '주차 요금 계산');
+  // 라벨은 <input> 뒤 텍스트 노드만 바꾼다 — textContent로 갈면 입력칸이 사라진다.
+  document.getElementById('fee-days').nextSibling.textContent = ' ' + tr('일');
+  document.getElementById('fee-hours').nextSibling.textContent = ' ' + tr('시간');
+  for (const sel of ['#fee-vehicle option', '#fee-discount option', '#bucket option', '.quick button'])
+    for (const el of document.querySelectorAll(sel)) el.textContent = tr(el.textContent.trim());
+  set('.fee-note', '중복 감면은 불가 — 높은 1개만 적용됩니다.');
+  set('#congestion h2', '출국장 혼잡도');
+  set('#shuttle h2', '터미널 셔틀 시간표');
+  const legends = document.querySelectorAll('.toolbar legend');
+  legends[0].textContent = tr('주차 유형');
+  legends[1].textContent = tr('기간');
+  legends[2].textContent = tr('단위');
+  set('#tab-series', '실측 추이');
+  set('#tab-pattern', '요일×시간 패턴');
+  set('#empty-note', '이 기간에는 수집된 데이터가 없습니다.');
+  set('#thin', '표본이 부족한 시간대가 있습니다. 데이터가 더 쌓이면 정확해집니다.');
+  const h3s = document.querySelectorAll('.stack-row h3');
+  h3s[0].textContent = tr('예상 여객 (명/시간)');
+  h3s[1].textContent = tr('출국장 대기시간 (분)');
+  h3s[2].textContent = tr('주차 사용률');
+  set('#layout h2', '주차장 배치');
+  set('#layout .caveat', '공식 안내도의 배치를 따릅니다. 각 터미널 건물이 맨 위에 있고, 아래로 내려갈수록 터미널에서 멀어집니다. 거리는 실제 축척이 아닙니다.');
+  document.getElementById('layout-note').innerHTML = tr('layout-note');
+}
+
+// --- 테마 -------------------------------------------------------------------
+// 저장값이 없으면 시스템을 따른다(auto). 수동 선택은 data-theme으로 강제한다.
+const THEMES = ['auto', 'light', 'dark'];
+let theme = 'auto';
+try { theme = localStorage.getItem('theme') || 'auto'; } catch (e) {}
+if (!THEMES.includes(theme)) theme = 'auto';
+
+function applyTheme() {
+  if (theme === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  const label = { auto: `◐ ${tr('자동')}`, light: `☀ ${tr('밝게')}`, dark: `🌙 ${tr('어둡게')}` };
+  document.getElementById('theme-btn').textContent = label[theme];
+}
+
 const groupKey = r => `${r.terminal} ${r.kind}`;
 
 // --- 필터 -----------------------------------------------------------------
@@ -399,7 +804,7 @@ const filters = { kind: new Set(KINDS) };
 
 function buildChips(containerId, values, axis, onChange) {
   document.getElementById(containerId).innerHTML = values.map(v => `
-    <label class="chip"><input type="checkbox" value="${v}" checked>${v}</label>`).join('');
+    <label class="chip"><input type="checkbox" value="${v}" checked>${tr(v)}</label>`).join('');
   document.getElementById(containerId).addEventListener('change', e => {
     const { value, checked } = e.target;
     checked ? filters[axis].add(value) : filters[axis].delete(value);
@@ -490,7 +895,7 @@ const holidayShade = {
       ctx.fillStyle = cssVar('--text-secondary');
       ctx.font = '600 11px system-ui, sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillText(`${run.name} ${run.days}일`, left + 4, area.top + 13);
+      ctx.fillText(FMT.holiday(tr(run.name), run.days), left + 4, area.top + 13);
     }
     ctx.restore();
   },
@@ -544,7 +949,9 @@ function seriesColor(group) {
   return cssVar(`--series-${(idx % PALETTE_SLOTS) + 1}`);
 }
 
-const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+const DOW = { ko: ['일', '월', '화', '수', '목', '금', '토'],
+              en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+              zh: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] }[LANG];
 const dowColor = dow => cssVar(`--series-${(dow % PALETTE_SLOTS) + 1}`);
 
 // 상하로 붙은 두 차트가 같은 시각을 함께 짚는다. 두 차트가 같은 stamps 배열을 쓰므로
@@ -611,7 +1018,7 @@ const nowLine = {
     ctx.font = '600 10px system-ui, sans-serif';
     ctx.fillStyle = cssVar('--text-secondary');
     ctx.textAlign = 'left';
-    ctx.fillText('지금', x + 3, top + 10);
+    ctx.fillText(tr('지금'), x + 3, top + 10);
     ctx.restore();
   },
 };
@@ -687,7 +1094,7 @@ function commonLineOptions(yTitle) {
         grid: { color: cssVar('--grid') },
         ticks: {
           color: cssVar('--muted'),
-          callback: v => v.toLocaleString('ko-KR'),
+          callback: v => v.toLocaleString(LOCALE),
         },
       },
     },
@@ -712,22 +1119,26 @@ async function loadCurrent() {
       // 게이지는 "찬 정도"를 칠한다 — 가득 찬 주차장일수록 바가 길다. 큰 숫자는
       // 남은 자리이므로, 바 옆 퍼센트도 같은 축(사용률)으로 맞춰 서로 어긋나지 않게 한다.
       const usedPct = cap ? (cap - free) / cap * 100 : 0;
-      return `<div class="card">${JSON.parse(k)[0]}
-        <b>${Math.round(free).toLocaleString('ko-KR')}</b>
-        <span class="card-sub">전체 ${cap.toLocaleString('ko-KR')}면 · 사용 ${pct1(usedPct)}%</span>
-        <span class="gauge${occClass(usedPct)}" role="img" aria-label="사용률 ${pct1(usedPct)}%"><i style="width:${usedPct}%"></i></span>
+      const [gTerm, gKind] = JSON.parse(k)[0].split(' ');
+      return `<div class="card">${gTerm} ${tr(gKind)}
+        <b>${Math.round(free).toLocaleString(LOCALE)}</b>
+        <span class="card-sub">${FMT.cardSub(cap.toLocaleString(LOCALE), pct1(usedPct))}</span>
+        <span class="gauge${occClass(usedPct)}" role="img" aria-label="${FMT.occAria(pct1(usedPct))}"><i style="width:${usedPct}%"></i></span>
       </div>`;
     }).join('');
   // 필터와 무관하게 전체 응답 기준으로 찍는다 — 필터를 다 꺼도 수집 시각은 유효하다.
   if (all.length) {
     document.getElementById('stamp').textContent =
-      '갱신: ' + new Date(Math.max(...all.map(r => r.ts)) * 1000).toLocaleString('ko-KR');
+      FMT.updated(new Date(Math.max(...all.map(r => r.ts)) * 1000).toLocaleString(LOCALE));
   }
 }
 
 // 표에서 고른 구역 하나를 차트에서 도드라지게 한다. 19개 선을 한꺼번에 보면 아무것도
 // 안 읽히므로, 표가 "어디가 찼나"에 답하고 차트는 고른 하나의 추세만 보여준다.
 let focusedFloor = null, hoverFloor = null;
+// 셔틀이 주차 현황보다 먼저 도착하면 renderLayout이 빈손으로 불린다 — 선언 없이
+// loadCurrent 대입에만 기대면 그 순간 ReferenceError다.
+let detailRows = [];
 
 function applyFocus() {
   if (!seriesChart) return;
@@ -745,7 +1156,7 @@ function applyFocus() {
   seriesChart.options.plugins.tooltip.mode = seriesChart.options.interaction.mode;
   seriesChart.update('none');
   document.getElementById('focus-note').textContent = focusedFloor
-    ? `${focusedFloor} 만 표시 중 — 배치도에서 같은 구역을 다시 누르면 전체로 돌아갑니다.` : '';
+    ? FMT.focusNote(tr(shortFloor(focusedFloor))) : '';
 }
 
 // 혼잡도 구간. 90% 이상이면 사실상 자리를 찾기 어렵고, 70%부터는 눈에 띄어야 한다.
@@ -823,9 +1234,9 @@ function nextShuttleLine(term) {
     const next = st.times.find(t => toMin(t) >= nowMin);
     if (!next) continue;
     const m = /\(([^)]+)\)$/.exec(st.name);       // '제1여객터미널(동)' -> '동'
-    parts.push(m ? `${m[1]} ${next}` : next);
+    parts.push(m ? `${tr(m[1])} ${next}` : next);
   }
-  return parts.length ? `<p class="term-shuttle">셔틀 다음 출발 · ${parts.join(' · ')}</p>` : '';
+  return parts.length ? `<p class="term-shuttle">${tr('셔틀 다음 출발')} · ${parts.join(' · ')}</p>` : '';
 }
 
 function renderLayout() {
@@ -836,12 +1247,12 @@ function renderLayout() {
     const r = by.get(f);
     const u = pct(r);
     const name = shortFloor(f).replace(/^장기\s*P[123]\s*/, '').replace(/^P5\s*/, '') || shortFloor(f);
-    const n = v => v.toLocaleString('ko-KR');
+    const n = v => v.toLocaleString(LOCALE);
     // 주차 대수 / 전체 면수. 옆에 붙는 사용률 %가 이 두 숫자의 비율이라 서로 검산된다.
-    const sub = r ? `${n(r.parked)} / ${n(r.capacity)}면` : '데이터 없음';
+    const sub = r ? FMT.slots(n(r.parked), n(r.capacity)) : tr('데이터 없음');
     return `<button type="button" class="lot" data-floor="${f}"
       aria-pressed="${f === focusedFloor}">
-      <span class="lot-name">${name}</span>
+      <span class="lot-name">${tr(name)}</span>
       <span class="lot-sub">${sub}</span>
       <span class="gauge${occClass(u)}"><i style="width:${u ?? 0}%"></i></span>
       <span class="num${occClass(u)}">${u === null ? '—' : pct1(u) + '%'}</span>
@@ -850,23 +1261,23 @@ function renderLayout() {
 
   document.getElementById('terminals').innerHTML = LAYOUT.filter(t => t.id === terminal).map(t => `
     <div class="terminal">
-      <h3>${t.title}</h3>
-      <div class="terminal-top">${t.title.split(' ')[0]} 건물</div>
-      <p class="away">↓ ${t.away}</p>
+      <h3>${tr(t.title)}</h3>
+      <div class="terminal-top">${FMT.building(t.id)}</div>
+      <p class="away">↓ ${tr(t.away)}</p>
       ${nextShuttleLine(t.id)}
-      ${t.axis ? `<div class="axis"><span>${t.axis[0]}</span><span>${t.axis[1]}</span></div>` : ''}
+      ${t.axis ? `<div class="axis"><span>${tr(t.axis[0])}</span><span>${tr(t.axis[1])}</span></div>` : ''}
       ${t.bands.map(b => `
         <div class="band ${b.access}">
-          <div class="band-label">${b.label}</div>
+          <div class="band-label">${tr(b.label)}</div>
           <div class="band-cells">
             ${b.cells.map(c => {
               const rs = c.floors.map(f => by.get(f)).filter(Boolean);
               const cap = rs.reduce((a, r) => a + r.capacity, 0);
               const parked = rs.reduce((a, r) => a + r.parked, 0);
               return `<div class="site${c.wide ? ' wide' : ''}${c.staff ? ' staff' : ''}">
-                <div class="site-head"><span>${c.site}</span>
-                  ${c.staff ? '' : `<span class="num">${parked.toLocaleString('ko-KR')} / ${cap.toLocaleString('ko-KR')}면</span>`}</div>
-                <div class="site-note">${c.note}</div>
+                <div class="site-head"><span>${tr(c.site)}</span>
+                  ${c.staff ? '' : `<span class="num">${FMT.slots(parked.toLocaleString(LOCALE), cap.toLocaleString(LOCALE))}</span>`}</div>
+                <div class="site-note">${tr(c.note)}</div>
                 ${c.floors.map(f => lotButton(f, c.site)).join('')}
               </div>`;
             }).join('')}
@@ -901,27 +1312,26 @@ async function loadCongestion() {
 
   if (!rows.length) {
     box.innerHTML = '';
-    document.getElementById('congestion-stamp').textContent = '아직 수집된 혼잡도가 없습니다.';
+    document.getElementById('congestion-stamp').textContent = tr('아직 수집된 혼잡도가 없습니다.');
     return;
   }
 
   box.innerHTML = rows.map(r => {
     // operatingTime이 비면 그 시각 미운영이다. 0명을 '한산하다'로 읽으면 닫힌 곳으로
     // 사람을 보내게 되므로 대기시간 대신 '미운영'을 쓴다.
-    const wait = r.open ? `${r.wait_minutes}${r.wait_capped ? '+' : ''}<small>분</small>` : '미운영';
+    const wait = r.open ? FMT.wait(r.wait_minutes, r.wait_capped) : tr('미운영');
     return `<div class="gate ${r.open ? LEVEL_CLASS[r.level] : 'closed'}">
       <div class="gate-name">${gateName(r.gate)}</div>
       <div class="gate-wait">${wait}</div>
       <div class="gate-sub">${r.open
-        ? `${r.wait_people.toLocaleString('ko-KR')}명 대기 · ${r.level}`
-        : (r.operating || '운영시간 아님')}</div>
+        ? FMT.waiting(r.wait_people.toLocaleString(LOCALE), tr(r.level))
+        : (r.operating || tr('운영시간 아님'))}</div>
     </div>`;
   }).join('');
 
   const newest = Math.max(...rows.map(r => r.ts));
   document.getElementById('congestion-stamp').textContent =
-    '측정: ' + new Date(newest * 1000).toLocaleString('ko-KR')
-    + ' · 20분 미만 원활 / 20~40 보통 / 40~60 혼잡 / 60분 이상 매우혼잡';
+    FMT.congStamp(new Date(newest * 1000).toLocaleString(LOCALE));
   updateSummary();
 }
 
@@ -948,13 +1358,13 @@ async function updateSummary() {
   if (shortTerm.length) {
     const cap = shortTerm.reduce((a, r) => a + r.capacity, 0);
     const free = shortTerm.reduce((a, r) => a + r.available, 0);
-    parts.push(`단기주차 <b>${pct1((cap - free) / cap * 100)}%</b> (${free.toLocaleString('ko-KR')}면 남음)`);
+    parts.push(FMT.summaryShort(pct1((cap - free) / cap * 100), free.toLocaleString(LOCALE)));
   }
 
   const open = lastCongestion.filter(r => r.terminal === terminal && r.open);
   if (open.length) {
     const worst = open.reduce((a, b) => a.wait_minutes >= b.wait_minutes ? a : b);
-    parts.push(`출국장 최대 대기 <b>${worst.wait_minutes}${worst.wait_capped ? '+' : ''}분</b> (${gateName(worst.gate)})`);
+    parts.push(FMT.summaryWait(`${worst.wait_minutes}${worst.wait_capped ? '+' : ''}`, gateName(worst.gate)));
   }
 
   const dep = new Map();
@@ -963,18 +1373,17 @@ async function updateSummary() {
   }
   if (dep.size) {
     const [peakHour] = [...dep.entries()].reduce((a, b) => a[1] >= b[1] ? a : b);
-    parts.push(`오늘 출국 피크 <b>${peakHour}~${(peakHour + 1) % 24}시</b>`);
+    parts.push(FMT.summaryPeak(peakHour, (peakHour + 1) % 24));
   }
 
-  el.innerHTML = parts.length ? `지금 ${terminal} · ` + parts.join(' · ') : '';
+  el.innerHTML = parts.length ? FMT.summaryNow(terminal) + parts.join(' · ') : '';
 }
 
 // DG3_E -> '3번 출국장 동편', DG1_A -> '1번 출국장 A'
 function gateName(id) {
   const m = /^DG(\d+)_(.+)$/.exec(id);
   if (!m) return id;
-  const side = { E: '동편', W: '서편' }[m[2]] ?? m[2];
-  return `${m[1]}번 출국장 ${side}`;
+  return FMT.hall(m[1], FMT.hallSide[m[2]] ?? m[2]);
 }
 
 // 터미널 셔틀 시간표. 도착예측 API는 죽어 있어(pred 전부 0, 2023년에 멈춘 행) 쓰지
@@ -987,7 +1396,7 @@ async function loadShuttle() {
   const box = document.getElementById('shuttle-stops');
   if (!stops.length) {
     box.innerHTML = '';
-    document.getElementById('shuttle-note').textContent = '시간표를 불러오지 못했습니다.';
+    document.getElementById('shuttle-note').textContent = tr('시간표를 불러오지 못했습니다.');
     return;
   }
 
@@ -1004,17 +1413,16 @@ async function loadShuttle() {
     const gaps = st.times.slice(1).map((t, i) => toMin(t) - toMin(st.times[i]));
     const median = gaps.length ? gaps.sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : null;
     return `<div class="stop">
-      <div class="stop-name">${st.name}</div>
+      <div class="stop-name">${tr(st.name)}</div>
       <div class="stop-next">${next
-        ? `${next}<small> 다음 ${upcoming.slice(1, 3).join(', ') || '—'}</small>`
-        : '오늘 운행 종료'}</div>
-      <div class="stop-sub">첫차 ${st.times[0]} · 막차 ${st.times[st.times.length - 1]}${
-        median ? ` · 배차 약 ${median}분` : ''}</div>
+        ? FMT.shuttleNext(next, upcoming.slice(1, 3).join(', ') || '—')
+        : tr('오늘 운행 종료')}</div>
+      <div class="stop-sub">${FMT.shuttleSub(st.times[0], st.times[st.times.length - 1], median)}</div>
     </div>`;
   }).join('');
 
   document.getElementById('shuttle-note').textContent =
-    (shuttleCache.day_type === 2 ? '휴일' : '평일') + ' 시간표 · 무료 터미널 순환 셔틀';
+    FMT.shuttleNote(shuttleCache.day_type === 2);
   renderLayout();          // 배치도 터미널 상자의 "다음 셔틀" 줄을 채운다
 }
 
@@ -1024,10 +1432,10 @@ async function searchFlight(ev) {
   const q = document.getElementById('flight-q').value.trim();
   const out = document.getElementById('flight-result');
   if (q.length < 3) { out.innerHTML = ''; return; }
-  const body = await (await fetch(`/api/flight?q=${encodeURIComponent(q)}`)).json();
+  const body = await (await fetch(`/api/flight?q=${encodeURIComponent(q)}&lang=${LANG}`)).json();
   if (body.error) { out.innerHTML = `<div class="flight-card">${body.error}</div>`; return; }
   if (!body.matches.length) {
-    out.innerHTML = `<div class="flight-card">오늘 출발편에서 '${q}'를 찾지 못했습니다.</div>`;
+    out.innerHTML = `<div class="flight-card">${FMT.flightNone(q)}</div>`;
     return;
   }
   const f = body.matches[0];
@@ -1049,17 +1457,17 @@ async function searchFlight(ev) {
     const n = paxTodayCache.rows
       .filter(r => r.terminal === f.terminal && r.direction === '출국' && r.hour === hour)
       .reduce((a, r) => a + r.expected, 0);
-    if (n) paxLine = ` · 그 시각 예상 출국 ${n.toLocaleString('ko-KR')}명`;
+    if (n) paxLine = FMT.paxAt(n.toLocaleString(LOCALE));
   }
 
   out.innerHTML = `<div class="flight-card">
-    <b>${f.flightId}</b> ${f.airline} · ${f.airport}행 ·
-    ${f.terminal}${f.concourse ? ' (탑승동 — 체크인·주차는 T1)' : ''} ·
-    출발 <b>${hhmm(f.scheduleDateTime)}</b>${f.estimatedDateTime && f.estimatedDateTime !== f.scheduleDateTime
-      ? ` (변경 <b>${hhmm(f.estimatedDateTime)}</b>)` : ''}${f.remark ? ` · ${f.remark}` : ''}
-    ${f.chkinrange ? `<div class="flight-note">체크인 카운터 ${f.chkinrange}${f.gatenumber ? ` · 게이트 ${f.gatenumber}` : ''}${
-      f.codeshare === 'Slave' && f.masterflightid ? ` · 공동운항(실제 ${f.masterflightid})` : ''}</div>` : ''}
-    ${arrive ? `<div class="flight-note">권장 공항 도착 <b>${arrive}</b> (출발 3시간 전 기준)${paxLine}</div>` : ''}
+    <b>${f.flightId}</b> ${f.airline} · ${FMT.flightDest(f.airport)} ·
+    ${f.terminal}${f.concourse ? FMT.concourse : ''} ·
+    ${tr('출발')} <b>${hhmm(f.scheduleDateTime)}</b>${f.estimatedDateTime && f.estimatedDateTime !== f.scheduleDateTime
+      ? ` (${tr('변경')} <b>${hhmm(f.estimatedDateTime)}</b>)` : ''}${f.remark ? ` · ${f.remark}` : ''}
+    ${f.chkinrange ? `<div class="flight-note">${tr('체크인 카운터')} ${f.chkinrange}${f.gatenumber ? ` · ${tr('게이트')} ${f.gatenumber}` : ''}${
+      f.codeshare === 'Slave' && f.masterflightid ? ` · ${FMT.codeshare(f.masterflightid)}` : ''}</div>` : ''}
+    ${arrive ? `<div class="flight-note">${FMT.arriveBy(arrive)}${paxLine}</div>` : ''}
   </div>`;
 }
 
@@ -1077,12 +1485,12 @@ async function updateFee() {
 
   const b = await (await fetch(
     `/api/fees/estimate?minutes=${minutes}&discount=${picked}&vehicle=${vehicle}`)).json();
-  const won = v => v.toLocaleString('ko-KR') + '원';
-  const tag = b.discount_rate ? ` <small>(${b.discount_rate}% 감면 적용)</small>` : '';
+  const won = FMT.won;
+  const tag = b.discount_rate ? ` <small>(${FMT.discountApplied(b.discount_rate)})</small>` : '';
   out.innerHTML = (vehicle === 'cargo'
-    ? `화물터미널 <b>${won(b.cargo)}</b>`
-    : `단기 <b>${won(b.short)}</b> · 장기 <b>${won(b.long)}</b>`) + tag
-    + (b.drift.length ? ' <small>(요금 기준 변경 감지 — 값이 낡았을 수 있음)</small>' : '');
+    ? `${tr('화물터미널')} <b>${won(b.cargo)}</b>`
+    : `${tr('단기')} <b>${won(b.short)}</b> · ${tr('장기')} <b>${won(b.long)}</b>`) + tag
+    + (b.drift.length ? ` <small>(${tr('요금 기준 변경 감지 — 값이 낡았을 수 있음')})</small>` : '');
 }
 
 let seriesChart, patternChart, paxChart;
@@ -1143,7 +1551,7 @@ async function loadSeries() {
     return {
       $floor: floor,
       $color: color,
-      label: shortFloor(floor),
+      label: tr(shortFloor(floor)),
       data: stamps.map(ts => {
         const r = byFloorTs.get(`${floor}|${ts}`);
         return r ? usedPercent([r]) : null;
@@ -1198,7 +1606,7 @@ async function loadSeries() {
       $color: cssVar('--muted'),
       $baseline: true,
       $context: true,
-      label: '평소 (요일×시간 평균)',
+      label: tr('평소 (요일×시간 평균)'),
       data: baseline,
       spanGaps: true,
       pointRadius: 0,
@@ -1217,13 +1625,13 @@ async function loadSeries() {
   seriesChart = new Chart(document.getElementById('chart-series'), {
     type: 'line',
     data: {
-      labels: stamps.map(ts => new Date(ts * 1000).toLocaleString('ko-KR')),
+      labels: stamps.map(ts => new Date(ts * 1000).toLocaleString(LOCALE)),
       datasets,
     },
     options: occupancyOptions(ctx => {
       const free = ctx.dataset.$free?.[ctx.dataIndex];
       return free === null || free === undefined
-        ? null : `${Math.round(free).toLocaleString('ko-KR')}면 남음`;
+        ? null : FMT.spacesLeft(Math.round(free).toLocaleString(LOCALE));
     }),
   });
   seriesChart.$stamps = stamps;   // 음영 플러그인이 라벨 인덱스를 찾는 데 쓴다
@@ -1245,7 +1653,7 @@ function drawPaxChart(stamps, paxSeries) {
     const data = paxSeries(dir);
     if (!data.some(v => v !== null)) continue;
     datasets.push({
-      label: dir,
+      label: tr(dir),
       data,
       stepped: 'middle',      // 시간 단위 데이터다. 매끄럽게 그리면 없는 해상도를 만든다.
       fill: true,
@@ -1263,18 +1671,18 @@ function drawPaxChart(stamps, paxSeries) {
   o.scales.y.title.display = false;
   o.scales.y.beginAtZero = true;
   o.scales.y.afterFit = sc => { sc.width = AXIS_WIDTH; };
-  o.scales.y.ticks.callback = v => v.toLocaleString('ko-KR');
+  o.scales.y.ticks.callback = v => v.toLocaleString(LOCALE);
   o.scales.x.ticks.display = false;      // 위 차트가 같은 축을 이미 보여준다
   o.plugins.legend.display = window.innerWidth > NARROW_PX;
   o.plugins.tooltip.callbacks = {
     label: ctx => ctx.parsed.y === null ? null
-      : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString('ko-KR')}명`,
+      : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y).toLocaleString(LOCALE)}${FMT.peopleSuffix}`,
   };
 
   paxChart?.destroy();
   paxChart = new Chart(document.getElementById('chart-pax'), {
     type: 'line',
-    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString('ko-KR')), datasets },
+    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString(LOCALE)), datasets },
     options: o,
   });
   paxChart.$stamps = stamps;
@@ -1308,7 +1716,7 @@ function drawCongestionChart(stamps, cong) {
 
   const halls = [...new Set(mine.map(r => hallOf(r.gate)).filter(Boolean))].sort();
   const datasets = halls.map(h => ({
-    label: `${h}번 출국장`,
+    label: FMT.hallShort(h),
     data: stamps.map(ts => {
       const v = cell.get(`${h}|${ts}`);
       return v ? v.reduce((a, b) => a + b, 0) / v.length : null;
@@ -1332,13 +1740,13 @@ function drawCongestionChart(stamps, cong) {
   o.plugins.legend.display = window.innerWidth > NARROW_PX;
   o.plugins.tooltip.callbacks = {
     label: ctx => ctx.parsed.y === null ? null
-      : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y)}${ctx.dataset.$capped[ctx.dataIndex] ? '+' : ''}분`,
+      : `${ctx.dataset.label}: ${Math.round(ctx.parsed.y)}${ctx.dataset.$capped[ctx.dataIndex] ? '+' : ''}${FMT.minSuffix}`,
   };
 
   congChart?.destroy();
   congChart = new Chart(document.getElementById('chart-congestion'), {
     type: 'line',
-    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString('ko-KR')), datasets },
+    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString(LOCALE)), datasets },
     options: o,
   });
   congChart.$stamps = stamps;
@@ -1351,7 +1759,7 @@ for (const id of ['chart-series', 'chart-pax', 'chart-congestion']) {
 
 function renderHolidayJump(runs) {
   document.getElementById('holiday-jump').innerHTML = runs.map(r =>
-    `<button type="button" data-from="${r.start}" data-to="${r.end}">${r.name} ${r.days}일</button>`
+    `<button type="button" data-from="${r.start}" data-to="${r.end}">${FMT.holiday(tr(r.name), r.days)}</button>`
   ).join('');
 }
 
@@ -1405,11 +1813,11 @@ async function loadPattern() {
   patternChart?.destroy();
   patternChart = new Chart(document.getElementById('chart-pattern'), {
     type: 'line',
-    data: { labels: hours.map(h => `${h}시`), datasets },
+    data: { labels: hours.map(FMT.hour), datasets },
     options: occupancyOptions(ctx => {
       const free = ctx.dataset.$free?.[ctx.dataIndex];
       return free === null || free === undefined
-        ? null : `평균 ${Math.round(free).toLocaleString('ko-KR')}면 남음`;
+        ? null : FMT.avgSpacesLeft(Math.round(free).toLocaleString(LOCALE));
     }),
   });
 }
@@ -1489,6 +1897,23 @@ document.getElementById('fee-hours').addEventListener('change', updateFee);
 document.getElementById('fee-vehicle').addEventListener('change', updateFee);
 document.getElementById('fee-discount').addEventListener('change', updateFee);
 updateFee();
+
+applyStaticI18n();
+applyTheme();
+document.getElementById('theme-btn').addEventListener('click', () => {
+  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+  try { localStorage.setItem('theme', theme); } catch (e) {}
+  applyTheme();
+  // 캔버스 색은 CSS 변수를 그리는 시점에 읽어 굽는다 — 다시 그려야 바뀐다.
+  applyChartTheme();
+  (activeTab() === 'series' ? loadSeries : loadPattern)();
+});
+const langSel = document.getElementById('lang');
+langSel.value = LANG;
+langSel.addEventListener('change', e => {
+  try { localStorage.setItem('lang', e.target.value); } catch (err) {}
+  location.reload();   // 문자열이 차트·카드 곳곳에 구워져 있다 — 제자리 갱신보다 새로 연다
+});
 
 setRange(7);
 loadCurrent().then(loadSeries);

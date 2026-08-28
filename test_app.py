@@ -1292,7 +1292,7 @@ def test_flight_endpoint_serves_from_the_cached_list(tmp_path, monkeypatch):
     monkeypatch.setenv("COLLECT", "0")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
 
-    async def fake_fetch():
+    async def fake_fetch(lang="K"):
         return FLIGHTS_SAMPLE
 
     monkeypatch.setattr(app, "fetch_departures", fake_fetch)
@@ -1361,3 +1361,25 @@ def test_fee_endpoint_compact_beats_a_lower_discount(tmp_path, monkeypatch):
 
     assert b["discount_rate"] == 50
     assert b["short"] == (1200 + 600 * 10) // 2
+
+
+def test_flight_endpoint_passes_language_upstream(tmp_path, monkeypatch):
+    # 항공사·도시명은 업스트림이 K/E/C로 준다 — 번역하지 말고 그대로 받아온다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    seen = []
+
+    async def fake_fetch(lang="K"):
+        seen.append(lang)
+        return [dict(FLIGHTS_SAMPLE[0], airline="KOREAN AIR", airport="Tokyo/Narita")]
+
+    monkeypatch.setattr(app, "fetch_departures", fake_fetch)
+
+    with TestClient(app.app) as client:
+        body = client.get("/api/flight?q=KE703&lang=en").json()
+        client.get("/api/flight?q=KE703&lang=zh")
+        client.get("/api/flight?q=KE703&lang=ko")
+        client.get("/api/flight?q=KE703&lang=??")     # 모르는 값은 한국어로
+
+    assert body["matches"][0]["airline"] == "KOREAN AIR"
+    assert seen == ["E", "C", "K", "K"]

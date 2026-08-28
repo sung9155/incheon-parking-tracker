@@ -213,11 +213,27 @@ Portainer는 이를 자기 내부 클론 디렉터리(`/data/compose/<id>/data`)
 
 코드를 고친 뒤에는 push하고 스택 화면에서 **Pull and redeploy**를 누르면 된다.
 
+## 언어와 테마
+
+UI는 한국어·영어·중국어(간체)를 지원한다. 헤더의 선택 상자로 바꾸며 `localStorage`에
+저장되고, 바꾸면 새로고침한다 — 문자열이 차트·카드 곳곳에 구워져 있어 제자리 갱신보다
+새로 여는 편이 값싸고 확실하다. 번역은 `static/index.html` 안의 사전 하나(`TR`, 키는
+한국어 원문)와 어순이 달라 조각으로 못 만드는 문장용 `FMT` 함수들로 이루어진다.
+사전에 없는 문자열은 한국어로 그대로 나온다 — 깨지는 대신 낡는 쪽을 택했다.
+항공사·도시명은 번역하지 않는다: 항공편 API가 `lang=K/E/C`를 직접 지원하므로
+`/api/flight?lang=`으로 그대로 통과시킨다(언어별 캐시).
+
+테마는 자동(시스템)·밝게·어둡게 3단 버튼이다. 수동 선택은 `<html data-theme>`으로
+강제하고, 다크 토큰 블록은 미디어쿼리(`:not([data-theme="light"])` 가드)와
+`[data-theme="dark"]` 두 곳에 중복해 둔다 — 시스템/수동 어느 경로로도 완전한
+팔레트가 나와야 하기 때문이다. 캔버스는 CSS 변수를 그리는 시점에 읽어 굽으므로
+테마를 바꾸면 차트를 다시 그린다.
+
 ## 개발
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (96개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (97개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 

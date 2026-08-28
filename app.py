@@ -423,19 +423,22 @@ def flight_search(items: list[dict], q: str) -> list[dict]:
     return out[:5]
 
 
-_flights_cache: tuple[float, list[dict]] | None = None
+# 언어별로 캐시한다 — 항공사·도시명은 업스트림이 K/E/C로 직접 준다. 우리가 번역하면
+# "도쿄/나리타"류 고유명사에서 반드시 틀린다.
+_flights_cache: dict[str, tuple[float, list[dict]]] = {}
 FLIGHTS_CACHE_SECONDS = 600
+FLIGHT_LANGS = {"ko": "K", "en": "E", "zh": "C"}
 
 
-async def fetch_departures() -> list[dict]:
-    global _flights_cache
-    if _flights_cache and time.time() - _flights_cache[0] < FLIGHTS_CACHE_SECONDS:
-        return _flights_cache[1]
+async def fetch_departures(lang: str = "K") -> list[dict]:
+    cached = _flights_cache.get(lang)
+    if cached and time.time() - cached[0] < FLIGHTS_CACHE_SECONDS:
+        return cached[1]
     async with httpx.AsyncClient() as client:
         r = await client.get(
             FLIGHTS_API_URL,
             params={"serviceKey": unquote(os.environ.get("SERVICE_KEY", "")),
-                    "numOfRows": 2000, "pageNo": 1, "type": "json", "lang": "K"},
+                    "numOfRows": 2000, "pageNo": 1, "type": "json", "lang": lang},
             timeout=20,
         )
         r.raise_for_status()
@@ -443,7 +446,7 @@ async def fetch_departures() -> list[dict]:
         items = body.get("items", [])
         if isinstance(items, dict):
             items = items.get("item", [])
-    _flights_cache = (time.time(), items)
+    _flights_cache[lang] = (time.time(), items)
     return items
 
 
@@ -959,10 +962,11 @@ def api_fee_estimate(
 
 
 @app.get("/api/flight")
-async def api_flight(q: str = Query(min_length=3, max_length=10)):
+async def api_flight(q: str = Query(min_length=3, max_length=10),
+                     lang: str = Query(default="ko")):
     """편명으로 오늘 출발편을 찾고, 주차 결정에 필요한 맥락을 함께 준다."""
     try:
-        items = await fetch_departures()
+        items = await fetch_departures(FLIGHT_LANGS.get(lang, "K"))
     except Exception as e:
         _log_collect_failure(e, "flights")
         return {"matches": [], "error": "운항 정보를 불러오지 못했습니다"}
