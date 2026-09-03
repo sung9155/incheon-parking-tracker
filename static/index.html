@@ -954,6 +954,12 @@ const DOW = { ko: ['일', '월', '화', '수', '목', '금', '토'],
               zh: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] }[LANG];
 const dowColor = dow => cssVar(`--series-${(dow % PALETTE_SLOTS) + 1}`);
 
+// 차트 x축·툴팁의 시각 라벨. 그래프를 볼 때는 "무슨 요일이었나"가 날짜만큼 중요하다.
+function stampLabel(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.toLocaleString(LOCALE)} (${DOW[d.getDay()]})`;
+}
+
 // 상하로 붙은 두 차트가 같은 시각을 함께 짚는다. 두 차트가 같은 stamps 배열을 쓰므로
 // 인덱스가 그대로 대응한다 — 마우스를 올린 쪽이 인덱스를 기록하면 다른 쪽도 같은
 // 자리에 선을 긋는다. 세로로 정렬해 둔 이유가 이 비교이므로, 각자 놀면 반쪽이다.
@@ -1625,7 +1631,7 @@ async function loadSeries() {
   seriesChart = new Chart(document.getElementById('chart-series'), {
     type: 'line',
     data: {
-      labels: stamps.map(ts => new Date(ts * 1000).toLocaleString(LOCALE)),
+      labels: stamps.map(stampLabel),
       datasets,
     },
     options: occupancyOptions(ctx => {
@@ -1682,7 +1688,7 @@ function drawPaxChart(stamps, paxSeries) {
   paxChart?.destroy();
   paxChart = new Chart(document.getElementById('chart-pax'), {
     type: 'line',
-    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString(LOCALE)), datasets },
+    data: { labels: stamps.map(stampLabel), datasets },
     options: o,
   });
   paxChart.$stamps = stamps;
@@ -1746,7 +1752,7 @@ function drawCongestionChart(stamps, cong) {
   congChart?.destroy();
   congChart = new Chart(document.getElementById('chart-congestion'), {
     type: 'line',
-    data: { labels: stamps.map(ts => new Date(ts * 1000).toLocaleString(LOCALE)), datasets },
+    data: { labels: stamps.map(stampLabel), datasets },
     options: o,
   });
   congChart.$stamps = stamps;
