@@ -520,7 +520,9 @@ en: {
   // 셔틀 정류장
   '제1여객터미널(8번)': 'Terminal 1 (stop 8)', '제1여객터미널(동)': 'Terminal 1 (east)',
   '제1여객터미널(서)': 'Terminal 1 (west)',
-  '동': 'E', '서': 'W', '8번': '#8',
+  '제2여객터미널(3층 6번)': 'Terminal 2 (3F stop 6)',
+  '제2여객터미널(3층 7번)': 'Terminal 2 (3F stop 7)',
+  '동': 'E', '서': 'W', '8번': '#8', '3층 6번': '3F #6', '3층 7번': '3F #7',
   '시간표를 불러오지 못했습니다.': "Couldn't load the timetable.",
   '오늘 운행 종료': 'Done for today',
   // 혼잡도
@@ -609,7 +611,9 @@ zh: {
   '셔틀 다음 출발': '摆渡车下一班',
   '제1여객터미널(8번)': '第一航站楼（8号）', '제1여객터미널(동)': '第一航站楼（东）',
   '제1여객터미널(서)': '第一航站楼（西）',
-  '동': '东', '서': '西', '8번': '8号',
+  '제2여객터미널(3층 6번)': '第二航站楼（3层6号）',
+  '제2여객터미널(3층 7번)': '第二航站楼（3层7号）',
+  '동': '东', '서': '西', '8번': '8号', '3층 6번': '3层6号', '3층 7번': '3层7号',
   '시간표를 불러오지 못했습니다.': '时刻表加载失败。',
   '오늘 운행 종료': '今日运营结束',
   '원활': '顺畅', '보통': '一般', '혼잡': '拥挤', '매우혼잡': '非常拥挤',
@@ -955,9 +959,11 @@ const DOW = { ko: ['일', '월', '화', '수', '목', '금', '토'],
 const dowColor = dow => cssVar(`--series-${(dow % PALETTE_SLOTS) + 1}`);
 
 // 차트 x축·툴팁의 시각 라벨. 그래프를 볼 때는 "무슨 요일이었나"가 날짜만큼 중요하다.
+// 연도·초는 이 축에서 정보가 아니라서 뺀다 — 눈금이 짧아야 축에 더 많이 들어간다.
 function stampLabel(ts) {
   const d = new Date(ts * 1000);
-  return `${d.toLocaleString(LOCALE)} (${DOW[d.getDay()]})`;
+  const time = d.toLocaleTimeString(LOCALE, { hour: 'numeric', minute: '2-digit' });
+  return `${d.getMonth() + 1}/${d.getDate()} (${DOW[d.getDay()]}) ${time}`;
 }
 
 // 상하로 붙은 두 차트가 같은 시각을 함께 짚는다. 두 차트가 같은 stamps 배열을 쓰므로
@@ -1029,6 +1035,31 @@ const nowLine = {
   },
 };
 Chart.register(nowLine);
+
+// 주말 음영: 요일 라벨을 읽지 않아도 토·일 구간이 눈에 들어오게 배경을 옅게 칠한다.
+const weekendShade = {
+  id: 'weekendShade',
+  beforeDatasetsDraw(chart) {
+    const stamps = chart.$stamps;
+    if (!stamps || stamps.length < 2) return;
+    const { ctx, chartArea: { top, bottom, left, right } } = chart;
+    const px = i => Math.min(right, Math.max(left, chart.scales.x.getPixelForValue(i)));
+    ctx.save();
+    ctx.fillStyle = cssVar('--muted');
+    ctx.globalAlpha = 0.08;
+    let start = null;
+    for (let i = 0; i <= stamps.length; i++) {
+      const wk = i < stamps.length && [0, 6].includes(new Date(stamps[i] * 1000).getDay());
+      if (wk && start === null) start = i;
+      if (!wk && start !== null) {
+        ctx.fillRect(px(start - 0.5), top, px(i - 0.5) - px(start - 0.5), bottom - top);
+        start = null;
+      }
+    }
+    ctx.restore();
+  },
+};
+Chart.register(weekendShade);
 
 function applyChartTheme() {
   Chart.defaults.color = cssVar('--text-secondary');
