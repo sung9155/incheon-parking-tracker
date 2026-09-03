@@ -233,7 +233,7 @@ UI는 한국어·영어·중국어(간체)를 지원한다. 헤더의 선택 상
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (97개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (101개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
@@ -257,6 +257,7 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 동/서(T2는 입구 A~D)는 실질적으로 같은 줄이고, T1 게이트 12개를 작은 차트에 다 그리면
 읽히지 않는다. 이 차트의 질문은 "몇 번 출국장이 빨라지고 있나"다.
 | `/api/holidays?from&to` | 구간에 걸친 황금연휴 |
+| `/api/dayoffs?from&to` | 구간 안의 공휴일 날짜 목록 (하루짜리 포함 — 차트 음영용) |
 | `/api/export.csv?from&to` | 구간의 **원본 행** CSV (화면에는 없음 — 백업용 API로만 유지) |
 | `/api/health` | 모니터링용. 오래됐으면 HTTP 503 |
 
@@ -269,6 +270,11 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 | `congestion` | 출국장 혼잡도 T1 (15148225) / T2 (15161098) | 3분 | 각 480 |
 | `fees` | 주차장별 요금 부과 기준 (15095053) | 1일 | 1 |
 | `spaces` | 주차면 현황 T1 (15107228) / T2 (15160956) | 1시간 | 각 24 / 48 |
+
+**보존 정책**: 90일이 지난 `parking`·`congestion` 행은 하루 한 번 시간 평균 한 행으로
+내려간다(`db.downsample_old`). 5분 해상도가 답하는 질문은 최근 데이터의 것이고, 오래된
+데이터에 남는 질문은 추이·패턴뿐이다. `passengers`·`space_stats`·`fees`는 애초에
+시간/일 단위라 그대로 둔다.
 
 **주차면 현황**은 면 단위 입차 시각을 준다. T1 안내문은 "단기주차장만"이라지만 **T2는
 장기 평면(lot 12)까지 포함**한다 — 체류 중앙값 31.5시간으로 확인했다. 1.5만 면의 원본을

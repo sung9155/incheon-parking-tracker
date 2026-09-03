@@ -282,3 +282,42 @@ def pattern(con: sqlite3.Connection, since: int | None = None,
     exclude_days = exclude_days or set()
     params: list = ([since] if since is not None else []) + sorted(exclude_days)
     return con.execute(pattern_sql(since, exclude_days), params).fetchall()
+
+
+# 이보다 오래된 고해상도 이력은 시간 평균으로 내린다. 5분 해상도가 답하는 질문("지금
+# 몇 시에 얼마나 빨리 차나")은 최근 데이터의 것이고, 90일 지난 데이터에 남는 질문은
+# 추이·패턴뿐이라 시간 단위면 충분하다. passengers·space_stats·fees는 애초에
+# 시간/일 단위라 손대지 않는다.
+DOWNSAMPLE_AFTER_DAYS = 90
+
+
+def downsample_old(con: sqlite3.Connection, now: int) -> int:
+    """cutoff 이전의 parking·congestion 행을 시간 평균 한 행으로 줄인다. 지운 행 수 반환.
+
+    cutoff를 시간 경계에 맞춰야 경계에 걸친 시간대가 반쪽짜리 평균이 되지 않는다.
+    이미 내려간 행은 자기 자신의 평균이라 재실행해도 변하지 않는다(멱등).
+    """
+    cutoff = (now - DOWNSAMPLE_AFTER_DAYS * 86400) // 3600 * 3600
+    count = ("SELECT (SELECT COUNT(*) FROM parking WHERE ts < ?) + "
+             "(SELECT COUNT(*) FROM congestion WHERE ts < ?)")
+    before = con.execute(count, (cutoff, cutoff)).fetchone()[0]
+    with con:   # 한 트랜잭션 — 평균을 넣다 만 채로 원본이 지워지면 안 된다
+        con.execute(
+            "INSERT OR REPLACE INTO parking (ts, floor, parked, capacity) "
+            "SELECT (ts / 3600) * 3600, floor, "
+            "CAST(ROUND(AVG(parked)) AS INTEGER), CAST(ROUND(AVG(capacity)) AS INTEGER) "
+            "FROM parking WHERE ts < ? GROUP BY 1, floor", (cutoff,))
+        con.execute("DELETE FROM parking WHERE ts < ? AND ts % 3600 != 0", (cutoff,))
+        con.execute(
+            # wait_capped/operating은 MAX — 잘린 측정이 하나라도 있으면 표시가 남아야
+            # 하고, 운영시간 문자열은 빈 값('')보다 아무 실제 값이 낫다.
+            "INSERT OR REPLACE INTO congestion "
+            "(ts, terminal, gate, wait_minutes, wait_people, wait_capped, operating) "
+            "SELECT (ts / 3600) * 3600, terminal, gate, "
+            "CAST(ROUND(AVG(wait_minutes)) AS INTEGER), "
+            "CAST(ROUND(AVG(wait_people)) AS INTEGER), "
+            "MAX(wait_capped), MAX(operating) "
+            "FROM congestion WHERE ts < ? GROUP BY 1, terminal, gate", (cutoff,))
+        con.execute("DELETE FROM congestion WHERE ts < ? AND ts % 3600 != 0", (cutoff,))
+    # ponytail: VACUUM 없음 — 빈 페이지는 재사용되고 파일 크기는 정체될 뿐 늘지 않는다
+    return before - con.execute(count, (cutoff, cutoff)).fetchone()[0]

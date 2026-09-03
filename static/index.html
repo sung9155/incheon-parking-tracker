@@ -2,6 +2,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>인천공항 주차 현황</title>
+<!-- PWA: 매니페스트와 아이콘만으로 홈 화면 설치가 된다. 서비스 워커는 두지 않는다 —
+     실시간 현황판이라 오프라인 캐시는 낡은 데이터를 진짜처럼 보여줄 뿐이다. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
 <!-- Chart.js v4.5.1 UMD build, vendored (not CDN) — 홈랜 대시보드가 jsdelivr 접속
      불가·마이너 버전 변경에 빈 화면으로 죽지 않게 한다 -->
 <script src="chart.umd.min.js"></script>
@@ -869,6 +876,7 @@ const currentRange = () => ({
 // Chart.js annotation 플러그인을 쓰지 않는다. 사각형 몇 개 그리자고 의존성을
 // 늘릴 이유가 없고, 이미 crosshair도 같은 방식으로 되어 있다.
 let holidayRuns = [];
+let dayoffDates = new Set();   // 황금연휴에 못 미치는 하루짜리 공휴일 ('YYYY-MM-DD')
 
 const holidayShade = {
   id: 'holidayShade',
@@ -1036,7 +1044,9 @@ const nowLine = {
 };
 Chart.register(nowLine);
 
-// 주말 음영: 요일 라벨을 읽지 않아도 토·일 구간이 눈에 들어오게 배경을 옅게 칠한다.
+// 주말·공휴일 음영: 요일 라벨을 읽지 않아도 쉬는 날 구간이 눈에 들어오게 배경을 옅게
+// 칠한다. 황금연휴 구간은 holidayShade가 이름표까지 붙여 따로 칠하므로 여기서 빼야
+// 한다 — 겹치면 연휴 속 주말만 진해져 얼룩진다.
 const weekendShade = {
   id: 'weekendShade',
   beforeDatasetsDraw(chart) {
@@ -1044,14 +1054,20 @@ const weekendShade = {
     if (!stamps || stamps.length < 2) return;
     const { ctx, chartArea: { top, bottom, left, right } } = chart;
     const px = i => Math.min(right, Math.max(left, chart.scales.x.getPixelForValue(i)));
+    const isOff = ts => {
+      const d = new Date(ts * 1000);
+      const iso = isoDate(d);
+      if (holidayRuns.some(r => iso >= r.start && iso <= r.end)) return false;
+      return d.getDay() === 0 || d.getDay() === 6 || dayoffDates.has(iso);
+    };
     ctx.save();
     ctx.fillStyle = cssVar('--muted');
     ctx.globalAlpha = 0.08;
     let start = null;
     for (let i = 0; i <= stamps.length; i++) {
-      const wk = i < stamps.length && [0, 6].includes(new Date(stamps[i] * 1000).getDay());
-      if (wk && start === null) start = i;
-      if (!wk && start !== null) {
+      const off = i < stamps.length && isOff(stamps[i]);
+      if (off && start === null) start = i;
+      if (!off && start !== null) {
         ctx.fillRect(px(start - 0.5), top, px(i - 0.5) - px(start - 0.5), bottom - top);
         start = null;
       }
@@ -1544,15 +1560,17 @@ async function loadSeries() {
   const q = `from=${from}&to=${to}`;
   const seriesRes = await fetch(`/api/series?${q}&bucket=${bucket}`);
   const usedBucket = Number(seriesRes.headers.get('X-Bucket-Seconds')) || 300;
-  const [all, runs, pattern, pax, cong] = await Promise.all([
+  const [all, runs, dayoffs, pattern, pax, cong] = await Promise.all([
     seriesRes.json(),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
+    fetch(`/api/dayoffs?${q}`).then(r => r.json()),
     getPattern(),
     fetch(`/api/passengers?${q}`).then(r => r.json()),
     fetch(`/api/congestion/series?${q}&bucket=${usedBucket}`).then(r => r.json()),
   ]);
   if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
   holidayRuns = runs;
+  dayoffDates = new Set(dayoffs.map(d => d.date));
   renderHolidayJump(runs);
 
   const rows = all.filter(passesFilter);

@@ -1383,3 +1383,60 @@ def test_flight_endpoint_passes_language_upstream(tmp_path, monkeypatch):
 
     assert body["matches"][0]["airline"] == "KOREAN AIR"
     assert seen == ["E", "C", "K", "K"]
+
+
+def test_dayoffs_lists_single_public_holidays(tmp_path, monkeypatch):
+    # 한글날(금요일 하루짜리)은 황금연휴에 못 미쳐 /api/holidays에는 없지만,
+    # 차트 음영을 위해 /api/dayoffs에는 나와야 한다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    with TestClient(app.app) as client:
+        days = client.get("/api/dayoffs?from=2026-10-01&to=2026-10-31").json()
+    dates = {d["date"] for d in days}
+    assert "2026-10-09" in dates
+    assert "2026-10-12" not in dates          # 평범한 월요일
+    assert all(d["name"] for d in days)
+
+
+def test_dayoffs_excludes_constitution_day(tmp_path, monkeypatch):
+    # 제헌절은 2008년부터 공휴일이 아니다 — golden_holidays와 같은 필터를 써야 한다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    with TestClient(app.app) as client:
+        days = client.get("/api/dayoffs?from=2026-07-01&to=2026-07-31").json()
+    assert "2026-07-17" not in {d["date"] for d in days}
+
+
+def test_downsample_collapses_old_rows_to_hourly(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    # 컷오프보다 하루 더 오래된 시간대의 정각
+    old = (now - (db.DOWNSAMPLE_AFTER_DAYS + 1) * 86400) // 3600 * 3600
+
+    db.insert_rows(con, [(old + 300, "A", 10, 100), (old + 600, "A", 20, 100),
+                         (old + 900, "A", 60, 100), (now, "A", 40, 100)])
+    db.upsert_congestion(con, [(old + 300, "T1", "DG1_E", 10, 100, 0, "05:00~22:00"),
+                               (old + 600, "T1", "DG1_E", 20, 200, 1, "05:00~22:00")])
+
+    assert db.downsample_old(con, now) == 3   # parking 3->1, congestion 2->1
+
+    rows = [tuple(r) for r in con.execute(
+        "SELECT ts, parked, capacity FROM parking ORDER BY ts")]
+    assert rows == [(old, 30, 100), (now, 40, 100)]   # AVG(10,20,60)=30, 최근 행은 그대로
+
+    c = con.execute(
+        "SELECT ts, wait_minutes, wait_people, wait_capped, operating FROM congestion"
+    ).fetchone()
+    # 60+로 잘린 측정이 하나라도 있었다는 표시(wait_capped)는 평균에 안 씻겨야 한다
+    assert tuple(c) == (old, 15, 150, 1, "05:00~22:00")
+
+    assert db.downsample_old(con, now) == 0   # 멱등
+
+
+def test_downsample_leaves_recent_rows_alone(tmp_path):
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time())
+    recent = now - 86400
+    db.insert_rows(con, [(recent, "A", 10, 100), (recent + 300, "A", 20, 100)])
+    assert db.downsample_old(con, now) == 0
+    assert con.execute("SELECT COUNT(*) FROM parking").fetchone()[0] == 2

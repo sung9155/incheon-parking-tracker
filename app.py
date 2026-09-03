@@ -726,6 +726,19 @@ async def collect_loop(source: "Source", con, key: str) -> None:
             await asyncio.sleep(source.interval)
 
 
+async def retention_loop(con) -> None:
+    """하루 한 번 오래된 이력을 시간 단위로 내린다. 수집이 아니라 SOURCES에 안 들어간다
+    — health의 stale 판정도, 수집 API 키도 이 루프와는 무관하다."""
+    while True:
+        try:
+            n = db.downsample_old(con, int(time.time()))
+            if n:
+                log.info("retention: downsampled %d rows", n)
+        except Exception:
+            log.exception("retention failed")
+        await asyncio.sleep(86400)
+
+
 # ---------------------------------------------------------------- 날짜 · 공휴일
 
 # 제헌절은 2008년부터 공휴일이 아니다. holidays 패키지는 아직 포함하고 있어서, 그대로
@@ -853,6 +866,7 @@ async def lifespan(_app: FastAPI):
             raise RuntimeError("SERVICE_KEY is required (set it in .env)")
         key = unquote(raw_key)
         tasks = [asyncio.create_task(collect_loop(src, con, key)) for src in SOURCES]
+        tasks.append(asyncio.create_task(retention_loop(con)))
     yield
     for task in tasks:
         task.cancel()
@@ -987,6 +1001,27 @@ def api_holidays(
     to_value: str = Query(alias="to"),
 ):
     return golden_holidays(from_value, to_value)
+
+
+@app.get("/api/dayoffs")
+def api_dayoffs(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+):
+    """구간 안의 공휴일 날짜 목록. 황금연휴에 못 미치는 하루짜리(한글날이 수요일인
+    해 등)도 차트에서 주말처럼 음영 처리하기 위한 것. 주말은 클라이언트가 스스로 안다."""
+    first, last = parse_date(from_value), parse_date(to_value)
+    calendar = holidays.country_holidays(
+        "KR", years=list(range(first.year, last.year + 1)), language="ko"
+    )
+    out = []
+    day = first
+    while day <= last:
+        name = calendar.get(day)
+        if name is not None and _base_name(name) not in NOT_A_DAY_OFF:
+            out.append({"date": day.isoformat(), "name": _base_name(name)})
+        day += timedelta(days=1)
+    return out
 
 
 # "평소"를 계산할 때 되돌아볼 기간. 3년 전 주차 패턴은 평소가 아니고, 전체 스캔은
