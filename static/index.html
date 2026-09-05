@@ -9,6 +9,14 @@
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<!-- 링크 공유 미리보기 (카톡·문자·슬랙). og:image는 절대 URL이어야 스크레이퍼가 읽는다. -->
+<meta name="description" content="인천공항 터미널별 주차 자리·출국장 대기시간·셔틀 시간표를 한 화면에서">
+<meta property="og:type" content="website">
+<meta property="og:title" content="인천공항 주차 현황">
+<meta property="og:description" content="터미널별 주차 자리·출국장 대기시간·셔틀 시간표를 한 화면에서">
+<meta property="og:url" content="https://airportparking.sgkwak.duckdns.org/">
+<meta property="og:image" content="https://airportparking.sgkwak.duckdns.org/icons/icon-512.png">
+<meta name="twitter:card" content="summary">
 <!-- Chart.js v4.5.1 UMD build, vendored (not CDN) — 홈랜 대시보드가 jsdelivr 접속
      불가·마이너 버전 변경에 빈 화면으로 죽지 않게 한다 -->
 <script src="chart.umd.min.js"></script>
@@ -110,6 +118,9 @@
     border-radius: .5rem; padding: 1rem; min-width: 9rem;
   }
   .card b { display: block; font-size: 2rem; color: var(--text-primary); }
+  .full-warn { font-size: .7rem; font-weight: 600; color: var(--occ-high);
+    border: 1px solid currentColor; border-radius: .5em; padding: 0 .35em;
+    vertical-align: 2px; white-space: nowrap; }
   .tabs { margin: 1.5rem 0 .5rem; }
   .tabs button {
     font: inherit; color: var(--text-primary); background: var(--surface);
@@ -530,6 +541,7 @@ en: {
   '제2여객터미널(3층 6번)': 'Terminal 2 (3F stop 6)',
   '제2여객터미널(3층 7번)': 'Terminal 2 (3F stop 7)',
   '동': 'E', '서': 'W', '8번': '#8', '3층 6번': '3F #6', '3층 7번': '3F #7',
+  '만차 임박': 'Almost full',
   '시간표를 불러오지 못했습니다.': "Couldn't load the timetable.",
   '오늘 운행 종료': 'Done for today',
   // 혼잡도
@@ -621,6 +633,7 @@ zh: {
   '제2여객터미널(3층 6번)': '第二航站楼（3层6号）',
   '제2여객터미널(3층 7번)': '第二航站楼（3层7号）',
   '동': '东', '서': '西', '8번': '8号', '3층 6번': '3层6号', '3층 7번': '3层7号',
+  '만차 임박': '即将满位',
   '시간표를 불러오지 못했습니다.': '时刻表加载失败。',
   '오늘 운행 종료': '今日运营结束',
   '원활': '顺畅', '보통': '一般', '혼잡': '拥挤', '매우혼잡': '非常拥挤',
@@ -654,6 +667,7 @@ ko: {
   avgSpacesLeft: n => `평균 ${n}면 남음`,
   summaryShort: (pct, free) => `단기주차 <b>${pct}%</b> (${free}면 남음)`,
   summaryWait: (w, gate) => `출국장 최대 대기 <b>${w}분</b> (${gate})`,
+  summaryFast: (gate, m) => `가장 빠른 곳 ${gate} (<b>${m}분</b>)`,
   summaryPeak: (h1, h2) => `오늘 출국 피크 <b>${h1}~${h2}시</b>`,
   summaryNow: term => `지금 ${term} · `,
   hall: (n, side) => `${n}번 출국장 ${side}`,
@@ -688,6 +702,7 @@ en: {
   avgSpacesLeft: n => `avg ${n} left`,
   summaryShort: (pct, free) => `Short-term <b>${pct}%</b> full (${free} left)`,
   summaryWait: (w, gate) => `longest departure wait <b>${w} min</b> (${gate})`,
+  summaryFast: (gate, m) => `fastest: ${gate} (<b>${m} min</b>)`,
   summaryPeak: (h1, h2) => `today's departure peak <b>${h1}:00–${h2}:00</b>`,
   summaryNow: term => `Now at ${term} · `,
   hall: (n, side) => `Entrance ${n} ${side}`,
@@ -722,6 +737,7 @@ zh: {
   avgSpacesLeft: n => `平均剩余${n}个`,
   summaryShort: (pct, free) => `短期停车 <b>${pct}%</b>（剩余${free}个）`,
   summaryWait: (w, gate) => `出境最长等待 <b>${w}分钟</b>（${gate}）`,
+  summaryFast: (gate, m) => `最快：${gate}（<b>${m}分钟</b>）`,
   summaryPeak: (h1, h2) => `今日出境高峰 <b>${h1}~${h2}时</b>`,
   summaryNow: term => `当前 ${term} · `,
   hall: (n, side) => `${n}号出境口${side}`,
@@ -1173,7 +1189,8 @@ async function loadCurrent() {
       // 남은 자리이므로, 바 옆 퍼센트도 같은 축(사용률)으로 맞춰 서로 어긋나지 않게 한다.
       const usedPct = cap ? (cap - free) / cap * 100 : 0;
       const [gTerm, gKind] = JSON.parse(k)[0].split(' ');
-      return `<div class="card">${gTerm} ${tr(gKind)}
+      return `<div class="card">${gTerm} ${tr(gKind)}${usedPct >= 90
+          ? ` <span class="full-warn">${tr('만차 임박')}</span>` : ''}
         <b>${Math.round(free).toLocaleString(LOCALE)}</b>
         <span class="card-sub">${FMT.cardSub(cap.toLocaleString(LOCALE), pct1(usedPct))}</span>
         <span class="gauge${occClass(usedPct)}" role="img" aria-label="${FMT.occAria(pct1(usedPct))}"><i style="width:${usedPct}%"></i></span>
@@ -1418,6 +1435,11 @@ async function updateSummary() {
   if (open.length) {
     const worst = open.reduce((a, b) => a.wait_minutes >= b.wait_minutes ? a : b);
     parts.push(FMT.summaryWait(`${worst.wait_minutes}${worst.wait_capped ? '+' : ''}`, gateName(worst.gate)));
+    // "어디로 가라"는 최대가 아니라 최소가 답한다. 다 비슷하면 추천할 게 없다.
+    const best = open.reduce((a, b) => a.wait_minutes <= b.wait_minutes ? a : b);
+    if (best.wait_minutes < worst.wait_minutes) {
+      parts.push(FMT.summaryFast(gateName(best.gate), best.wait_minutes));
+    }
   }
 
   const dep = new Map();
