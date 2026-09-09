@@ -1000,7 +1000,18 @@ def api_holidays(
     from_value: str = Query(alias="from"),
     to_value: str = Query(alias="to"),
 ):
-    return golden_holidays(from_value, to_value)
+    """구간에 걸친 황금연휴 — 단, 데이터가 있는 기간으로 좁힌다. 수집 시작 전(광복절이
+    그랬다)이나 예고가 닿지 않는 먼 미래의 연휴를 돌려주면 프론트가 그걸로 점프 버튼을
+    만들어 빈 차트로 안내하는 셈이 된다."""
+    lo, hi = app.state.con.execute("SELECT MIN(ts), MAX(ts) FROM parking").fetchone()
+    if lo is None:
+        return []
+    first = max(parse_date(from_value), datetime.fromtimestamp(lo).date())
+    # 여객 예고가 축을 내일까지 늘리므로 하루 여유를 둔다
+    last = min(parse_date(to_value), datetime.fromtimestamp(hi).date() + timedelta(days=1))
+    if first > last:
+        return []
+    return golden_holidays(first.isoformat(), last.isoformat())
 
 
 @app.get("/api/dayoffs")

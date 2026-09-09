@@ -531,10 +531,42 @@ def test_holidays_endpoint_returns_runs(tmp_path, monkeypatch):
     monkeypatch.setenv("COLLECT", "0")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
 
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(int(datetime(2026, 9, 20).timestamp()), "A", 10, 100),
+                         (int(datetime(2026, 9, 30).timestamp()), "A", 10, 100)])
+    con.close()
+
     with TestClient(app.app) as client:
         runs = client.get("/api/holidays?from=2026-09-01&to=2026-09-30").json()
 
     assert {"start": "2026-09-24", "end": "2026-09-27", "name": "추석", "days": 4} in runs
+
+
+def test_holidays_endpoint_hides_runs_outside_the_data(tmp_path, monkeypatch):
+    # 광복절 버그: 수집 시작(8/24) 전의 연휴를 돌려주면 점프 버튼이 빈 차트로 안내한다.
+    # 데이터가 닿지 않는 미래의 연휴(추석)도 마찬가지다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    con = db.connect(tmp_path / "t.db")
+    db.insert_rows(con, [(int(datetime(2026, 8, 24).timestamp()), "A", 10, 100),
+                         (int(datetime(2026, 9, 9).timestamp()), "A", 10, 100)])
+    con.close()
+
+    with TestClient(app.app) as client:
+        runs = client.get("/api/holidays?from=2026-08-10&to=2026-09-30").json()
+
+    names = [r["name"] for r in runs]
+    assert "광복절" not in names          # 8/15~17, 데이터 시작 전
+    assert "추석" not in names            # 9/24~27, 아직 오지 않음
+
+
+def test_holidays_endpoint_returns_nothing_without_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        assert client.get("/api/holidays?from=2026-09-01&to=2026-09-30").json() == []
 
 
 def test_golden_holidays_ignores_constitution_day_substitute():
