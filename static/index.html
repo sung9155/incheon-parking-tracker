@@ -32,6 +32,7 @@
     --baseline: #c3c2b7;
     --border: rgba(11, 11, 11, 0.10);
     --holiday-shade: rgba(191, 106, 46, 0.10);
+    --pred: #6d28d9;
     --occ-low: #3d8f4e;
     --occ-mid: #c9821f;
     --occ-high: #c8402f;
@@ -61,6 +62,7 @@
       --baseline: #383835;
       --border: rgba(255, 255, 255, 0.10);
       --holiday-shade: rgba(230, 152, 84, 0.13);
+      --pred: #a78bfa;
       --occ-low: #62b874;
       --occ-mid: #e0a244;
       --occ-high: #f0705c;
@@ -91,6 +93,7 @@
       --baseline: #383835;
       --border: rgba(255, 255, 255, 0.10);
       --holiday-shade: rgba(230, 152, 84, 0.13);
+      --pred: #a78bfa;
       --occ-low: #62b874;
       --occ-mid: #e0a244;
       --occ-high: #f0705c;
@@ -512,6 +515,7 @@ en: {
   'P1 장기주차타워': 'Long-term tower P1', 'P2 장기주차타워': 'Long-term tower P2',
   '주차장': 'Lot', '주차타워': 'Tower', '예약주차장': 'Reserved',
   '평소 (요일×시간 평균)': 'Typical (day × hour avg)',
+  '예측': 'Forecast',
   '지금': 'Now', '데이터 없음': 'No data',
   // 배치도
   '제1여객터미널 (T1)': 'Terminal 1 (T1)', '제2여객터미널 (T2)': 'Terminal 2 (T2)',
@@ -606,6 +610,7 @@ zh: {
   'P1 장기주차타워': '长期停车楼P1', 'P2 장기주차타워': '长期停车楼P2',
   '주차장': '露天', '주차타워': '停车楼', '예약주차장': '预约停车场',
   '평소 (요일×시간 평균)': '平时（星期×小时平均）',
+  '예측': '预测',
   '지금': '现在', '데이터 없음': '无数据',
   '제1여객터미널 (T1)': '第一航站楼 (T1)', '제2여객터미널 (T2)': '第二航站楼 (T2)',
   '남쪽으로 멀어짐': '向南渐远', '북쪽으로 멀어짐': '向北渐远',
@@ -1582,13 +1587,14 @@ async function loadSeries() {
   const q = `from=${from}&to=${to}`;
   const seriesRes = await fetch(`/api/series?${q}&bucket=${bucket}`);
   const usedBucket = Number(seriesRes.headers.get('X-Bucket-Seconds')) || 300;
-  const [all, runs, dayoffs, pattern, pax, cong] = await Promise.all([
+  const [all, runs, dayoffs, pattern, pax, cong, fc] = await Promise.all([
     seriesRes.json(),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
     fetch(`/api/dayoffs?${q}`).then(r => r.json()),
     getPattern(),
     fetch(`/api/passengers?${q}`).then(r => r.json()),
     fetch(`/api/congestion/series?${q}&bucket=${usedBucket}`).then(r => r.json()),
+    fetch('/api/forecast').then(r => r.json()),
   ]);
   if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
   holidayRuns = runs;
@@ -1692,6 +1698,41 @@ async function loadSeries() {
       borderColor: cssVar('--muted'),
       backgroundColor: cssVar('--muted'),
       borderDash: [5, 4],
+      tension: 0,
+      pointStyle: 'line',
+    });
+  }
+
+  // 예측선: 현재 점유에서 출발해, 평소 증감에 여객 예고 편차를 보정해 적분한 값
+  // (서버 forecast.py). '평소'와 달리 오늘이 평소와 다르다는 사실을 안다 — 지금
+  // 가득 차 있으면 높은 곳에서 시작하고, 연휴 예고가 크면 그만큼 더 채운다.
+  const predByTs = new Map();
+  for (const r of fc.filter(passesFilter)) {
+    const cur = predByTs.get(r.ts) ?? [0, 0];
+    cur[0] += r.available;
+    cur[1] += r.capacity;
+    predByTs.set(r.ts, cur);
+  }
+  const nowSec = Date.now() / 1000;
+  const predPct = stamps.map(ts => {
+    const p = ts > nowSec && predByTs.get(ts);
+    return p && p[1] ? (p[1] - p[0]) / p[1] * 100 : null;
+  });
+  if (predPct.some(v => v !== null)) {
+    datasets.unshift({
+      $floor: null,
+      $color: cssVar('--pred'),
+      $context: true,
+      label: tr('예측'),
+      data: predPct,
+      $free: stamps.map(ts => (ts > nowSec && predByTs.get(ts)?.[0]) || null),
+      spanGaps: true,             // 예측은 시간 단위 — 5분 축에서는 점 사이를 잇는다
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      borderWidth: 1.5,
+      borderColor: cssVar('--pred'),
+      backgroundColor: cssVar('--pred'),
+      borderDash: [2, 3],
       tension: 0,
       pointStyle: 'line',
     });

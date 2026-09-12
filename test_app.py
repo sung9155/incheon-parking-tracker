@@ -1,6 +1,6 @@
 import pathlib
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -1472,3 +1472,91 @@ def test_downsample_leaves_recent_rows_alone(tmp_path):
     db.insert_rows(con, [(recent, "A", 10, 100), (recent + 300, "A", 20, 100)])
     assert db.downsample_old(con, now) == 0
     assert con.execute("SELECT COUNT(*) FROM parking").fetchone()[0] == 2
+
+
+# ---------------------------------------------------------------- 예측 (forecast.py)
+import forecast as fc
+
+
+def _hourly(_unused, days, profile):
+    """매일 같은 시간별 대수 프로파일을 가진 합성 이력. {ts: 대수}"""
+    out = {}
+    for d in range(days):
+        for h in range(24):
+            ts = int(datetime(2026, 8, 1 + d, h).timestamp())
+            out[ts] = profile[h]
+    return out
+
+
+def test_forecast_continues_the_daily_pattern():
+    profile = [100 + 5 * h for h in range(24)]        # 매시 +5, 자정에 리셋
+    hist = _hourly(None, 14, profile)
+    model = fc.fit(hist, {}, {}, set(), lag=3)
+    assert model is not None
+
+    start = max(hist)                                  # 8/14 23시
+    pred = fc.forecast(model, start, hist[start], 10_000, 6, {}, {}, set())
+    got = [round(pred[start + i * 3600]) for i in range(1, 7)]
+    assert got == [profile[h] for h in (0, 1, 2, 3, 4, 5)]
+
+
+def test_forecast_clamps_at_105_percent_of_capacity():
+    # 증감이 늘 +10이어도 정원의 105%에서 멈춘다 — 실측에서 T1 장기가 100.2%를 찍었다.
+    profile = [10 * h for h in range(24)]
+    hist = _hourly(None, 14, profile)
+    model = fc.fit(hist, {}, {}, set(), lag=3)
+    start = int(datetime(2026, 8, 14, 10).timestamp())  # 오르막 중간에서 출발
+    pred = fc.forecast(model, start, hist[start], 120, 8, {}, {}, set())
+    assert max(pred.values()) <= 120 * 1.05
+    assert min(pred.values()) >= 0
+
+
+def test_fit_needs_at_least_two_days():
+    profile = [100] * 24
+    assert fc.fit(_hourly(None, 1, profile), {}, {}, set(), lag=3) is None
+
+
+def test_fit_keeps_a_real_pax_coefficient_and_drops_noise():
+    # 증감이 출국예고 편차의 정확히 0.5배인 세계 — 계수 a는 살아남아야 하고,
+    # 증감과 무관한 입국예고의 계수 b는 유의성 가드에 걸려 0이어야 한다.
+    hist, pdep, parr = {}, {}, {}
+    parked = 1000.0
+    for d in range(14):
+        for h in range(24):
+            ts = int(datetime(2026, 8, 1 + d, h).timestamp())
+            # 같은 시각이라도 날마다 달라야 셀 평균에 흡수되지 않는다 (d*24+h는 24가
+            # 짝수라 시간에만 의존 → 편차가 전부 0이 되는 함정)
+            dep_anom = 100 if (d + h) % 2 else -100
+            noise_arr = 50 if (d + 2 * h) % 3 else -50        # 증감과 무관한 다른 주기
+            pdep[ts + 3 * 3600] = 5000 + dep_anom
+            parr[ts] = 3000 + noise_arr
+            parked += 0.5 * dep_anom
+            hist[ts] = parked
+    model = fc.fit(hist, pdep, parr, set(), lag=3)
+    assert abs(model.a - 0.5) < 0.05
+    assert model.b == 0.0
+
+
+def test_forecast_endpoint_returns_future_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setattr(app, "_forecast_cache", (0.0, []))
+
+    known_floor = next(iter(app.FLOOR_GROUPS))
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time()) // 3600 * 3600
+    rows = [(now - i * 3600, known_floor, 500 + (i % 24) * 10, 2000) for i in range(24 * 7)]
+    db.insert_rows(con, rows)
+    tomorrow = (datetime.now() + timedelta(days=1)).date().isoformat()
+    term = app.FLOOR_GROUPS[known_floor][0]
+    db.upsert_passengers(con, [(tomorrow, h, term, "출국", "A·B", 1000) for h in range(24)],
+                         int(time.time()))
+    con.close()
+
+    with TestClient(app.app) as client:
+        out = client.get("/api/forecast").json()
+
+    assert out, "예측 행이 나와야 한다"
+    assert all(r["ts"] > now for r in out)
+    assert all(r["terminal"] == term for r in out)
+    assert all(0 <= r["available"] <= r["capacity"] * 1.05 + 1 for r in out)

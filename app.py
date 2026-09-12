@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import db
+import forecast
 
 log = logging.getLogger("parking")
 
@@ -1052,6 +1053,88 @@ def pattern_exclusions(since: int, until: int) -> set[str]:
             days.add(day.isoformat())
             day += timedelta(days=1)
     return days
+
+
+# ---------------------------------------------------------------- 예측
+
+# 학습 창. 공항 이용 패턴은 계절 따라 변한다 — 너무 먼 과거는 지금의 평소가 아니다.
+FORECAST_TRAIN_DAYS = 60
+# 적분 지평선 상한. 여객 예고가 내일치까지라 실제로는 그보다 먼저 끊긴다.
+FORECAST_MAX_HOURS = 36
+FORECAST_CACHE_SECONDS = 600
+_forecast_cache: tuple[float, list] = (0.0, [])
+
+
+def _off_dates(first: date, last: date) -> set[str]:
+    """구간 안의 공휴일 날짜(ISO). 주말은 forecast.cell_of가 스스로 안다."""
+    calendar = holidays.country_holidays(
+        "KR", years=list(range(first.year, last.year + 1)), language="ko"
+    )
+    out = set()
+    day = first
+    while day <= last:
+        name = calendar.get(day)
+        if name is not None and _base_name(name) not in NOT_A_DAY_OFF:
+            out.add(day.isoformat())
+        day += timedelta(days=1)
+    return out
+
+
+@app.get("/api/forecast")
+def api_forecast():
+    """'지금' 이후 시간별 예상 점유 — 현재 점유에서 출발해, 평소 증감에 여객 예고
+    편차를 보정해 적분한다 (forecast.py). 여객 예고가 닿는 데까지만 돌려준다.
+
+    행 모양을 /api/series와 맞춘다 — 프론트가 같은 방식으로 필터·합산한다.
+    """
+    global _forecast_cache
+    if time.time() - _forecast_cache[0] < FORECAST_CACHE_SECONDS:
+        return _forecast_cache[1]
+
+    con, now = app.state.con, int(time.time())
+    since = now - FORECAST_TRAIN_DAYS * 86400
+
+    parked: dict[tuple, dict[int, float]] = {}      # (term,kind) -> {ts: 대수}
+    caps: dict[tuple, dict[int, float]] = {}
+    for r in db.series(con, since, now, 3600):
+        group = group_of(r["floor"])
+        parked.setdefault(group, {})
+        caps.setdefault(group, {})
+        parked[group][r["ts"]] = parked[group].get(r["ts"], 0.0) + (r["capacity"] - r["available"])
+        caps[group][r["ts"]] = caps[group].get(r["ts"], 0.0) + r["capacity"]
+
+    first_day = datetime.fromtimestamp(since).date()
+    last_day = datetime.fromtimestamp(now).date() + timedelta(days=2)
+    pdep: dict[tuple, dict[int, float]] = {"T1": {}, "T2": {}}
+    parr: dict[tuple, dict[int, float]] = {"T1": {}, "T2": {}}
+    for r in db.passengers(con, first_day.isoformat(), last_day.isoformat()):
+        ts = int(datetime.combine(parse_date(r["adate"]), clock(hour=r["hour"])).timestamp())
+        side = pdep if r["direction"] == "출국" else parr
+        side.setdefault(r["terminal"], {})
+        side[r["terminal"]][ts] = side[r["terminal"]].get(ts, 0.0) + r["expected"]
+
+    off = _off_dates(first_day, last_day)
+
+    out = []
+    for (term, kind), hist in parked.items():
+        model = forecast.fit(hist, pdep.get(term, {}), parr.get(term, {}),
+                             off, forecast.LAGS.get(term, 3))
+        if model is None:
+            continue
+        last_ts = max(hist)
+        cap = caps[(term, kind)][last_ts]
+        future_pax = [ts for ts in pdep.get(term, {}) if ts > last_ts]
+        if not future_pax or not cap:
+            continue
+        hours = min((max(future_pax) - last_ts) // forecast.HOUR, FORECAST_MAX_HOURS)
+        pred = forecast.forecast(model, last_ts, hist[last_ts], cap, hours,
+                                 pdep[term], parr.get(term, {}), off)
+        out.extend({"ts": ts, "terminal": term, "kind": kind,
+                    "available": round(cap - v), "capacity": round(cap)}
+                   for ts, v in sorted(pred.items()))
+
+    _forecast_cache = (time.time(), out)
+    return out
 
 
 @app.get("/api/pattern")
