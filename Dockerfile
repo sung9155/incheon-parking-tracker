@@ -9,7 +9,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY db.py app.py ./
+COPY db.py forecast.py app.py ./
 COPY static/ ./static/
 
 EXPOSE 8000
