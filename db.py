@@ -164,6 +164,33 @@ def upsert_space_stats(con: sqlite3.Connection, rows) -> None:
     con.commit()
 
 
+def spaces_series(con: sqlite3.Connection, start: int, end: int) -> list[sqlite3.Row]:
+    """터미널·주차장 단위 체류 히스토그램 추이 (시간 단위).
+
+    안쪽 쿼리가 한 수집의 구역(zone)들을 합치고, 바깥 쿼리가 같은 시간대에 수집이
+    두 번 떨어진 드문 경우를 평균으로 뭉갠다 — SUM으로 합치면 그 시간만 두 배가 된다.
+    """
+    return con.execute(
+        """
+        SELECT hour AS ts, terminal, lot,
+               AVG(occupied) AS occupied, AVG(total) AS total,
+               AVG(d0_3) AS d0_3, AVG(d3_12) AS d3_12, AVG(d12_24) AS d12_24,
+               AVG(d1_3) AS d1_3, AVG(d3_7) AS d3_7, AVG(d7p) AS d7p
+        FROM (
+          SELECT (ts / 3600) * 3600 AS hour, ts, terminal, lot,
+                 SUM(occupied) AS occupied, SUM(total) AS total,
+                 SUM(d0_3) AS d0_3, SUM(d3_12) AS d3_12, SUM(d12_24) AS d12_24,
+                 SUM(d1_3) AS d1_3, SUM(d3_7) AS d3_7, SUM(d7p) AS d7p
+          FROM space_stats WHERE ts BETWEEN ? AND ?
+          GROUP BY ts, terminal, lot
+        )
+        GROUP BY hour, terminal, lot
+        ORDER BY hour, terminal, lot
+        """,
+        (start, end),
+    ).fetchall()
+
+
 def space_stats_latest(con: sqlite3.Connection) -> list[sqlite3.Row]:
     return con.execute(
         "SELECT MAX(ts) AS ts, terminal, lot, zone, total, occupied, "

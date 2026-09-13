@@ -1560,3 +1560,39 @@ def test_forecast_endpoint_returns_future_rows(tmp_path, monkeypatch):
     assert all(r["ts"] > now for r in out)
     assert all(r["terminal"] == term for r in out)
     assert all(0 <= r["available"] <= r["capacity"] * 1.05 + 1 for r in out)
+
+
+def test_spaces_series_endpoint_sums_zones(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    con = db.connect(tmp_path / "t.db")
+    ts = int(datetime(2026, 9, 10, 14, 0, 7).timestamp())   # 수집 지터 7초
+    db.upsert_space_stats(con, [
+        (ts, "T2", "12", "A", 100, 80, (10, 10, 10, 20, 20, 10)),
+        (ts, "T2", "12", "B", 100, 60, (5, 5, 10, 20, 10, 10)),
+    ])
+    con.close()
+
+    with TestClient(app.app) as client:
+        rows = client.get("/api/spaces/series?from=2026-09-10&to=2026-09-10").json()
+
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["ts"] == ts // 3600 * 3600           # 시간 경계로 정규화
+    assert (r["terminal"], r["lot"]) == ("T2", "12")
+    assert r["occupied"] == 140 and r["d7p"] == 20
+
+
+def test_malformed_dates_get_422_not_500(tmp_path, monkeypatch):
+    # 실화: epoch를 넣었더니 500이 났다. 잘못된 입력은 요청 잘못(422)이다.
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+
+    with TestClient(app.app) as client:
+        for path in ("/api/series?from=1788000000&to=1789000000",
+                     "/api/congestion/series?from=x&to=y",
+                     "/api/spaces/series?from=2026-13-40&to=2026-09-10",
+                     "/api/holidays?from=nope&to=2026-09-10",
+                     "/api/dayoffs?from=2026-09-10&to=nope"):
+            assert client.get(path).status_code == 422, path

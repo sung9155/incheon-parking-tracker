@@ -233,7 +233,7 @@ UI는 한국어·영어·중국어(간체)를 지원한다. 헤더의 선택 상
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (108개 테스트)
+python -m pytest test_app.py -v                      # 외부 호출 없이 실행됨 (110개 테스트)
 COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동, 수집기는 끈다
 ```
 
@@ -257,6 +257,7 @@ COLLECT=0 SERVICE_KEY=<키> python -m uvicorn app:app --reload   # 로컬 구동
 동/서(T2는 입구 A~D)는 실질적으로 같은 줄이고, T1 게이트 12개를 작은 차트에 다 그리면
 읽히지 않는다. 이 차트의 질문은 "몇 번 출국장이 빨라지고 있나"다.
 | `/api/forecast` | '지금' 이후 시간별 예상 점유 (여객 예고가 닿는 데까지, 10분 캐시) |
+| `/api/spaces/series?from&to` | 주차면 체류시간 히스토그램 추이 (시간 단위) |
 | `/api/holidays?from&to` | 구간에 걸친 황금연휴 |
 | `/api/dayoffs?from&to` | 구간 안의 공휴일 날짜 목록 (하루짜리 포함 — 차트 음영용) |
 | `/api/export.csv?from&to` | 구간의 **원본 행** CSV (화면에는 없음 — 백업용 API로만 유지) |

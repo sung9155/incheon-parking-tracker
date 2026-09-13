@@ -435,6 +435,11 @@
       <h3>주차 사용률</h3>
       <div class="chart-box"><canvas id="chart-series"></canvas></div>
     </div>
+    <div class="stack-row hidden" id="row-dwell">
+      <h3>체류시간 분포 (세워진 차 중 %)</h3>
+      <div class="chart-box pax"><canvas id="chart-dwell"></canvas></div>
+      <p class="caveat" id="dwell-note">공개 범위: T1은 단기주차장, T2는 단기+장기 평면. 7일+ 비중이 늘면 그 자리는 당분간 안 빈다는 뜻입니다.</p>
+    </div>
   </div>
   <p id="focus-note"></p>
 </div>
@@ -516,6 +521,10 @@ en: {
   '주차장': 'Lot', '주차타워': 'Tower', '예약주차장': 'Reserved',
   '평소 (요일×시간 평균)': 'Typical (day × hour avg)',
   '예측': 'Forecast',
+  '체류시간 분포 (세워진 차 중 %)': 'Dwell time mix (% of parked cars)',
+  'dwell-note': 'Coverage: T1 short-term lot; T2 short-term + long-term surface lot. A rising 7 d+ share means those spaces will not free up soon.',
+  '0~3시간': '0–3 h', '3~12시간': '3–12 h', '12~24시간': '12–24 h',
+  '1~3일': '1–3 d', '3~7일': '3–7 d', '7일 이상': '7 d+',
   '지금': 'Now', '데이터 없음': 'No data',
   // 배치도
   '제1여객터미널 (T1)': 'Terminal 1 (T1)', '제2여객터미널 (T2)': 'Terminal 2 (T2)',
@@ -611,6 +620,10 @@ zh: {
   '주차장': '露天', '주차타워': '停车楼', '예약주차장': '预约停车场',
   '평소 (요일×시간 평균)': '平时（星期×小时平均）',
   '예측': '预测',
+  '체류시간 분포 (세워진 차 중 %)': '停放时长构成（占在场车辆%）',
+  'dwell-note': '公开范围：T1为短期停车场，T2为短期+长期平面停车场。7天以上占比上升，意味着这些车位短期内不会空出。',
+  '0~3시간': '0~3小时', '3~12시간': '3~12小时', '12~24시간': '12~24小时',
+  '1~3일': '1~3天', '3~7일': '3~7天', '7일 이상': '7天以上',
   '지금': '现在', '데이터 없음': '无数据',
   '제1여객터미널 (T1)': '第一航站楼 (T1)', '제2여객터미널 (T2)': '第二航站楼 (T2)',
   '남쪽으로 멀어짐': '向南渐远', '북쪽으로 멀어짐': '向北渐远',
@@ -673,6 +686,7 @@ ko: {
   summaryShort: (pct, free) => `단기주차 <b>${pct}%</b> (${free}면 남음)`,
   summaryWait: (w, gate) => `출국장 최대 대기 <b>${w}분</b> (${gate})`,
   summaryFast: (gate, m) => `가장 빠른 곳 ${gate} (<b>${m}분</b>)`,
+  summaryFullSoon: (h, pct) => `⚠ ${h}시경 단기 <b>${pct}%</b> 예상`,
   summaryPeak: (h1, h2) => `오늘 출국 피크 <b>${h1}~${h2}시</b>`,
   summaryNow: term => `지금 ${term} · `,
   hall: (n, side) => `${n}번 출국장 ${side}`,
@@ -708,6 +722,7 @@ en: {
   summaryShort: (pct, free) => `Short-term <b>${pct}%</b> full (${free} left)`,
   summaryWait: (w, gate) => `longest departure wait <b>${w} min</b> (${gate})`,
   summaryFast: (gate, m) => `fastest: ${gate} (<b>${m} min</b>)`,
+  summaryFullSoon: (h, pct) => `⚠ short-term expected <b>${pct}%</b> around ${h}:00`,
   summaryPeak: (h1, h2) => `today's departure peak <b>${h1}:00–${h2}:00</b>`,
   summaryNow: term => `Now at ${term} · `,
   hall: (n, side) => `Entrance ${n} ${side}`,
@@ -743,6 +758,7 @@ zh: {
   summaryShort: (pct, free) => `短期停车 <b>${pct}%</b>（剩余${free}个）`,
   summaryWait: (w, gate) => `出境最长等待 <b>${w}分钟</b>（${gate}）`,
   summaryFast: (gate, m) => `最快：${gate}（<b>${m}分钟</b>）`,
+  summaryFullSoon: (h, pct) => `⚠ 预计${h}时短期停车达 <b>${pct}%</b>`,
   summaryPeak: (h1, h2) => `今日出境高峰 <b>${h1}~${h2}时</b>`,
   summaryNow: term => `当前 ${term} · `,
   hall: (n, side) => `${n}号出境口${side}`,
@@ -804,6 +820,8 @@ function applyStaticI18n() {
   h3s[0].textContent = tr('예상 여객 (명/시간)');
   h3s[1].textContent = tr('출국장 대기시간 (분)');
   h3s[2].textContent = tr('주차 사용률');
+  h3s[3].textContent = tr('체류시간 분포 (세워진 차 중 %)');
+  set('#dwell-note', 'dwell-note');
   set('#layout h2', '주차장 배치');
   set('#layout .caveat', '공식 안내도의 배치를 따릅니다. 각 터미널 건물이 맨 위에 있고, 아래로 내려갈수록 터미널에서 멀어집니다. 거리는 실제 축척이 아닙니다.');
   document.getElementById('layout-note').innerHTML = tr('layout-note');
@@ -1109,7 +1127,10 @@ function occupancyOptions(tooltipExtra) {
   const o = commonLineOptions('');
   o.scales.y.title.display = false;
   o.scales.y.min = 0;
-  o.scales.y.max = 100;
+  // 평소엔 100이 천장이되, 정원 초과(T1 장기 실측 100.2%)가 있으면 딱 그만큼만
+  // 열어준다. bounds:'data'가 없으면 Chart.js가 다음 눈금(120)까지 벌려 위가 빈다.
+  o.scales.y.bounds = 'data';
+  o.scales.y.afterDataLimits = sc => { sc.max = Math.max(100, Math.min(sc.max, 106)); };
   o.scales.y.afterFit = sc => { sc.width = AXIS_WIDTH; };   // 아래 여객 차트와 정렬
   o.scales.y.ticks.callback = v => `${v}%`;
   o.plugins.tooltip.callbacks = {
@@ -1414,6 +1435,7 @@ async function loadCongestion() {
 // 차 타기 직전에 실제로 알고 싶은 것: 지금 세울 수 있나, 출국장 줄이 긴가,
 // 오늘 언제가 붐비나. 전부 이미 받아둔 데이터라 요청이 늘지 않는다.
 let paxTodayCache = { at: 0, rows: [] };
+let lastForecast = [];             // loadSeries가 채운다 — /api/forecast 응답 그대로
 
 async function updateSummary() {
   const el = document.getElementById('summary');
@@ -1434,6 +1456,19 @@ async function updateSummary() {
     const cap = shortTerm.reduce((a, r) => a + r.capacity, 0);
     const free = shortTerm.reduce((a, r) => a + r.available, 0);
     parts.push(FMT.summaryShort(pct1((cap - free) / cap * 100), free.toLocaleString(LOCALE)));
+
+    // 지금은 여유라도 예측이 12시간 안에 90%를 넘으면 미리 알린다 — 경보의 가치는
+    // 만차가 되기 전에 울리는 데 있다. 이미 90%를 넘었으면 카드 배지가 말하고 있다.
+    const usedPct = (cap - free) / cap * 100;
+    const soon = lastForecast
+      .filter(r => r.terminal === terminal && r.kind === '단기'
+        && r.ts <= Date.now() / 1000 + 12 * 3600
+        && (r.capacity - r.available) / r.capacity * 100 >= 90)
+      .sort((a, b) => a.ts - b.ts)[0];
+    if (usedPct < 90 && soon) {
+      parts.push(FMT.summaryFullSoon(new Date(soon.ts * 1000).getHours(),
+        pct1((soon.capacity - soon.available) / soon.capacity * 100)));
+    }
   }
 
   const open = lastCongestion.filter(r => r.terminal === terminal && r.open);
@@ -1587,7 +1622,7 @@ async function loadSeries() {
   const q = `from=${from}&to=${to}`;
   const seriesRes = await fetch(`/api/series?${q}&bucket=${bucket}`);
   const usedBucket = Number(seriesRes.headers.get('X-Bucket-Seconds')) || 300;
-  const [all, runs, dayoffs, pattern, pax, cong, fc] = await Promise.all([
+  const [all, runs, dayoffs, pattern, pax, cong, fc, spaces] = await Promise.all([
     seriesRes.json(),
     fetch(`/api/holidays?${q}`).then(r => r.json()),
     fetch(`/api/dayoffs?${q}`).then(r => r.json()),
@@ -1595,6 +1630,7 @@ async function loadSeries() {
     fetch(`/api/passengers?${q}`).then(r => r.json()),
     fetch(`/api/congestion/series?${q}&bucket=${usedBucket}`).then(r => r.json()),
     fetch('/api/forecast').then(r => r.json()),
+    fetch(`/api/spaces/series?${q}`).then(r => r.json()),
   ]);
   if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
   holidayRuns = runs;
@@ -1756,8 +1792,10 @@ async function loadSeries() {
   seriesChart.update();
   applyFocus();                   // 다시 그려도 고른 구역은 계속 강조된 채로 남는다
 
+  lastForecast = fc;               // 요약 줄의 "곧 만차" 경보가 쓴다
   drawPaxChart(stamps, paxSeries);
   drawCongestionChart(stamps, cong);
+  drawDwellChart(spaces);
 }
 
 // 두 차트의 y축 라벨 폭이 다르면 플롯 영역이 어긋나 같은 시각이 세로로 안 맞는다.
@@ -1868,6 +1906,68 @@ function drawCongestionChart(stamps, cong) {
     options: o,
   });
   congChart.$stamps = stamps;
+}
+
+let dwellChart;
+const DWELL_CLASSES = [['d0_3', '0~3시간'], ['d3_12', '3~12시간'], ['d12_24', '12~24시간'],
+                       ['d1_3', '1~3일'], ['d3_7', '3~7일'], ['d7p', '7일 이상']];
+
+// 체류시간 분포: 지금 세워진 차들이 얼마나 오래 서 있었나. 7일+ 비중이 커지면 그
+// 면들은 당분간 회전하지 않는다 — 출차율 모델(v2)의 재료이기도 하다. 시간 단위
+// 수집이라 stamps(버킷 축)와 어긋날 수 있어 십자선 동기화에는 끼지 않는다.
+function drawDwellChart(rows) {
+  const row = document.getElementById('row-dwell');
+  const mine = rows.filter(r => r.terminal === terminal);
+  if (!mine.length) {
+    row.classList.add('hidden');
+    dwellChart?.destroy(); dwellChart = null;
+    return;
+  }
+  row.classList.remove('hidden');
+
+  // lot 합산 — T2는 단기(11)+장기 평면(12)이 함께 온다. 범위는 dwell-note가 알린다.
+  const byTs = new Map();
+  for (const r of mine) {
+    const cur = byTs.get(r.ts)
+      ?? { occupied: 0, d0_3: 0, d3_12: 0, d12_24: 0, d1_3: 0, d3_7: 0, d7p: 0 };
+    for (const k of Object.keys(cur)) cur[k] += r[k];
+    byTs.set(r.ts, cur);
+  }
+  const stamps = [...byTs.keys()].sort((a, b) => a - b);
+  const datasets = DWELL_CLASSES.map(([k, name], i) => ({
+    label: tr(name),
+    data: stamps.map(ts => {
+      const c = byTs.get(ts);
+      return c.occupied ? c[k] / c.occupied * 100 : null;
+    }),
+    fill: i === 0 ? 'origin' : '-1',
+    backgroundColor: cssVar(`--series-${i + 1}`) + '80',
+    borderColor: cssVar(`--series-${i + 1}`),
+    borderWidth: 1,
+    pointRadius: 0,
+    pointHoverRadius: 3,
+    tension: 0,
+    pointStyle: 'rectRounded',
+  }));
+
+  const o = commonLineOptions('');
+  o.scales.y.title.display = false;
+  o.scales.y.min = 0;
+  o.scales.y.max = 100;          // 비율 스택이라 여기는 진짜 100이 상한이다
+  o.scales.y.stacked = true;
+  o.scales.y.afterFit = sc => { sc.width = AXIS_WIDTH; };
+  o.scales.y.ticks.callback = v => `${v}%`;
+  o.plugins.legend.display = window.innerWidth > NARROW_PX;
+  o.plugins.tooltip.callbacks = {
+    label: ctx => ctx.parsed.y === null ? null : `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%`,
+  };
+
+  dwellChart?.destroy();
+  dwellChart = new Chart(document.getElementById('chart-dwell'), {
+    type: 'line',
+    data: { labels: stamps.map(stampLabel), datasets },
+    options: o,
+  });
 }
 
 // 캔버스를 벗어나면 onHover가 더 불리지 않는다. 십자선이 남지 않도록 직접 지운다.

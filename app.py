@@ -11,7 +11,7 @@ from urllib.parse import unquote
 
 import holidays
 import httpx
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -760,12 +760,20 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def parse_date_query(value: str) -> date:
+    """쿼리스트링에서 온 날짜. 잘못된 입력은 서버 잘못(500)이 아니라 요청 잘못(422)이다."""
+    try:
+        return parse_date(value)
+    except ValueError:
+        raise HTTPException(422, f"date must be YYYY-MM-DD, got {value!r}")
+
+
 def day_range_epoch(from_value: str, to_value: str) -> tuple[int, int]:
     """`YYYY-MM-DD` 두 개를 그 날들을 온전히 덮는 epoch 구간으로 바꾼다.
 
     parse_datetm과 같은 규약으로 로컬 시간대(컨테이너의 TZ=Asia/Seoul) 자정을 쓴다.
     """
-    first, last = parse_date(from_value), parse_date(to_value)
+    first, last = parse_date_query(from_value), parse_date_query(to_value)
     start = int(datetime.combine(first, clock.min).timestamp())
     end = int(datetime.combine(last, clock.max).timestamp())
     return start, end
@@ -952,6 +960,16 @@ def api_congestion_series(
     return [dict(r) for r in db.congestion_series(app.state.con, start, end, size)]
 
 
+@app.get("/api/spaces/series")
+def api_spaces_series(
+    from_value: str = Query(alias="from"),
+    to_value: str = Query(alias="to"),
+):
+    """주차면 체류시간 히스토그램 추이. 공개 범위: T1 단기, T2 단기+장기 평면(lot 12)."""
+    start, end = day_range_epoch(from_value, to_value)
+    return [dict(r) for r in db.spaces_series(app.state.con, start, end)]
+
+
 @app.get("/api/fees/estimate")
 def api_fee_estimate(
     minutes: int = Query(ge=1, le=60 * 24 * 60),
@@ -1004,12 +1022,13 @@ def api_holidays(
     """구간에 걸친 황금연휴 — 단, 데이터가 있는 기간으로 좁힌다. 수집 시작 전(광복절이
     그랬다)이나 예고가 닿지 않는 먼 미래의 연휴를 돌려주면 프론트가 그걸로 점프 버튼을
     만들어 빈 차트로 안내하는 셈이 된다."""
+    req_first, req_last = parse_date_query(from_value), parse_date_query(to_value)
     lo, hi = app.state.con.execute("SELECT MIN(ts), MAX(ts) FROM parking").fetchone()
     if lo is None:
         return []
-    first = max(parse_date(from_value), datetime.fromtimestamp(lo).date())
+    first = max(req_first, datetime.fromtimestamp(lo).date())
     # 여객 예고가 축을 내일까지 늘리므로 하루 여유를 둔다
-    last = min(parse_date(to_value), datetime.fromtimestamp(hi).date() + timedelta(days=1))
+    last = min(req_last, datetime.fromtimestamp(hi).date() + timedelta(days=1))
     if first > last:
         return []
     return golden_holidays(first.isoformat(), last.isoformat())
@@ -1022,7 +1041,7 @@ def api_dayoffs(
 ):
     """구간 안의 공휴일 날짜 목록. 황금연휴에 못 미치는 하루짜리(한글날이 수요일인
     해 등)도 차트에서 주말처럼 음영 처리하기 위한 것. 주말은 클라이언트가 스스로 안다."""
-    first, last = parse_date(from_value), parse_date(to_value)
+    first, last = parse_date_query(from_value), parse_date_query(to_value)
     calendar = holidays.country_holidays(
         "KR", years=list(range(first.year, last.year + 1)), language="ko"
     )
