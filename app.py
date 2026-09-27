@@ -1078,8 +1078,9 @@ def pattern_exclusions(since: int, until: int) -> set[str]:
 
 # 학습 창. 공항 이용 패턴은 계절 따라 변한다 — 너무 먼 과거는 지금의 평소가 아니다.
 FORECAST_TRAIN_DAYS = 60
-# 적분 지평선 상한. 여객 예고가 내일치까지라 실제로는 그보다 먼저 끊긴다.
-FORECAST_MAX_HOURS = 36
+# 적분 지평선 상한. 오차가 지평선에 단조 증가한다 — 추석(2026-09) 검증에서 25~36h 구간은
+# 평시 5~6%p, 연휴 14~19%p로 어느 쪽에서도 쓸 만하지 않았다 (README '예측' 참고).
+FORECAST_MAX_HOURS = 24
 FORECAST_CACHE_SECONDS = 600
 _forecast_cache: tuple[float, list] = (0.0, [])
 
