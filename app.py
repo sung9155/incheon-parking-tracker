@@ -1100,20 +1100,8 @@ def _off_dates(first: date, last: date) -> set[str]:
     return out
 
 
-@app.get("/api/forecast")
-def api_forecast():
-    """'지금' 이후 시간별 예상 점유 — 현재 점유에서 출발해, 평소 증감에 여객 예고
-    편차를 보정해 적분한다 (forecast.py). 여객 예고가 닿는 데까지만 돌려준다.
-
-    행 모양을 /api/series와 맞춘다 — 프론트가 같은 방식으로 필터·합산한다.
-    """
-    global _forecast_cache
-    if time.time() - _forecast_cache[0] < FORECAST_CACHE_SECONDS:
-        return _forecast_cache[1]
-
-    con, now = app.state.con, int(time.time())
-    since = now - FORECAST_TRAIN_DAYS * 86400
-
+def _forecast_inputs(con, since: int, now: int):
+    """예측 재료 — 그룹별 시간당 주차대수·정원, 터미널별 출국·입국 예고, 공휴일."""
     parked: dict[tuple, dict[int, float]] = {}      # (term,kind) -> {ts: 대수}
     caps: dict[tuple, dict[int, float]] = {}
     for r in db.series(con, since, now, 3600):
@@ -1125,16 +1113,47 @@ def api_forecast():
 
     first_day = datetime.fromtimestamp(since).date()
     last_day = datetime.fromtimestamp(now).date() + timedelta(days=2)
-    pdep: dict[tuple, dict[int, float]] = {"T1": {}, "T2": {}}
-    parr: dict[tuple, dict[int, float]] = {"T1": {}, "T2": {}}
+    pdep: dict[str, dict[int, float]] = {"T1": {}, "T2": {}}
+    parr: dict[str, dict[int, float]] = {"T1": {}, "T2": {}}
     for r in db.passengers(con, first_day.isoformat(), last_day.isoformat()):
         ts = int(datetime.combine(parse_date(r["adate"]), clock(hour=r["hour"])).timestamp())
         side = pdep if r["direction"] == "출국" else parr
         side.setdefault(r["terminal"], {})
         side[r["terminal"]][ts] = side[r["terminal"]].get(ts, 0.0) + r["expected"]
 
-    off = _off_dates(first_day, last_day)
+    return parked, caps, pdep, parr, _off_dates(first_day, last_day)
 
+
+def _forecast_rows(term: str, kind: str, cap: float, pred: dict) -> list[dict]:
+    """행 모양을 /api/series와 맞춘다 — 프론트가 같은 방식으로 필터한다."""
+    return [{"ts": ts, "terminal": term, "kind": kind,
+             "available": round(cap - v), "capacity": round(cap)}
+            for ts, v in sorted(pred.items())]
+
+
+def hindcast_day(hist, origin: int, cap: float, pdep, parr, off) -> dict:
+    """origin(어느 날 0시)에 알던 것만으로 낸 24시간 예측 — 지나간 날의 예측선을 재현한다.
+
+    학습 창은 현재 예측과 같은 60일이되 origin에서 끝난다. 그날 실측을 훔쳐보면
+    재현이 아니라 사후 설명이 된다.
+    """
+    train = {t: v for t, v in hist.items() if origin - FORECAST_TRAIN_DAYS * 86400 <= t <= origin}
+    if origin not in train:
+        return {}
+    model = forecast.fit(train, pdep, parr, off)
+    if model is None:
+        return {}
+    return forecast.forecast(model, origin, train[origin], cap, FORECAST_MAX_HOURS, pdep, parr, off)
+
+
+def _live_forecast(con, now: int) -> list[dict]:
+    """'지금' 이후 시간별 예상 점유 — 마지막 실측에서 출발해 적분한다 (forecast.py).
+    여객 예고가 닿는 데까지, 최대 FORECAST_MAX_HOURS."""
+    global _forecast_cache
+    if time.time() - _forecast_cache[0] < FORECAST_CACHE_SECONDS:
+        return _forecast_cache[1]
+
+    parked, caps, pdep, parr, off = _forecast_inputs(con, now - FORECAST_TRAIN_DAYS * 86400, now)
     out = []
     for (term, kind), hist in parked.items():
         model = forecast.fit(hist, pdep.get(term, {}), parr.get(term, {}), off)
@@ -1148,12 +1167,64 @@ def api_forecast():
         hours = min((max(future_pax) - last_ts) // forecast.HOUR, FORECAST_MAX_HOURS)
         pred = forecast.forecast(model, last_ts, hist[last_ts], cap, hours,
                                  pdep[term], parr.get(term, {}), off)
-        out.extend({"ts": ts, "terminal": term, "kind": kind,
-                    "available": round(cap - v), "capacity": round(cap)}
-                   for ts, v in sorted(pred.items()))
+        out.extend(_forecast_rows(term, kind, cap, pred))
 
     _forecast_cache = (time.time(), out)
     return out
+
+
+# 끝난 날의 재현은 다시 계산해도 같다 — (날짜, 그룹)별로 프로세스 수명 동안 캐시한다.
+# 오늘치는 자정 이후 예고가 갱신될 수 있어 매번 낸다 (fit 여섯 번, 밀리초 단위).
+_hindcast_cache: dict[tuple, list] = {}
+
+
+def _hindcast(con, first: date, last: date, now: int, live: list[dict]) -> list[dict]:
+    """[first, last] 각 날의 자정 기점 24시간 재현. 현재 예측이 시작하기 전 시각까지만 —
+    시각·그룹당 행이 하나여야 프론트가 한 선으로 잇는다."""
+    today = datetime.fromtimestamp(now).date()
+    last = min(last, today)
+    if first > last:
+        return []
+    since = int(datetime.combine(first, clock.min).timestamp()) - FORECAST_TRAIN_DAYS * 86400
+    parked, caps, pdep, parr, off = _forecast_inputs(con, since, now)
+
+    live_start: dict[tuple, int] = {}
+    for r in live:
+        g = (r["terminal"], r["kind"])
+        live_start[g] = min(live_start.get(g, r["ts"]), r["ts"])
+
+    out = []
+    for (term, kind), hist in parked.items():
+        cutoff = live_start.get((term, kind), max(hist) + forecast.HOUR) - forecast.HOUR
+        day = first
+        while day <= last:
+            key = (day.isoformat(), term, kind)
+            rows = _hindcast_cache.get(key) if day < today else None
+            if rows is None:
+                origin = int(datetime.combine(day, clock.min).timestamp())
+                cap = caps[(term, kind)].get(origin)
+                pred = hindcast_day(hist, origin, cap, pdep.get(term, {}), parr.get(term, {}), off) if cap else {}
+                rows = _forecast_rows(term, kind, cap, pred) if pred else []
+                if day < today:
+                    _hindcast_cache[key] = rows
+            out.extend(r for r in rows if r["ts"] <= cutoff)
+            day += timedelta(days=1)
+    return out
+
+
+@app.get("/api/forecast")
+def api_forecast(
+    from_value: str | None = Query(default=None, alias="from"),
+    to_value: str | None = Query(default=None, alias="to"),
+):
+    """시간별 예상 점유. 인자 없이는 '지금' 이후만. from/to를 주면 그 구간의 지나간
+    날들에 대해 자정 기점 24시간 재현을 앞에 붙인다 — 지나간 시각은 재현, 그 뒤는
+    현재 예측이라 차트의 "지금" 선에서 한 번 꺾인다."""
+    con, now = app.state.con, int(time.time())
+    live = _live_forecast(con, now)
+    if from_value is None or to_value is None:
+        return live
+    return _hindcast(con, parse_date_query(from_value), parse_date_query(to_value), now, live) + live
 
 
 @app.get("/api/pattern")

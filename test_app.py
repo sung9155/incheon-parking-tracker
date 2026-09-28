@@ -1563,6 +1563,45 @@ def test_incomplete_day_gets_no_pax_correction():
     assert with_pax == plain
 
 
+def test_hindcast_uses_only_data_known_at_its_origin():
+    # 14일은 매시 +5, 15일째는 매시 -5인 세계. 15일 자정 기점 재현은 그때까지의
+    # 데이터만 봐야 하므로 자정 실측(400)에서 출발해 +5씩 올라가야 한다.
+    # 그날 실측(-5)을 훔쳐보면 이 검사가 실패한다.
+    up = [100 + 5 * h for h in range(24)]
+    down = [400 - 5 * h for h in range(24)]
+    hist = _hourly(None, 14, up)
+    for h in range(24):
+        hist[int(datetime(2026, 8, 15, h).timestamp())] = down[h]
+    origin = int(datetime(2026, 8, 15, 0).timestamp())
+    pred = app.hindcast_day(hist, origin, 10_000, {}, {}, set())
+    assert [round(pred[origin + i * 3600]) for i in range(1, 6)] == [400 + 5 * i for i in range(1, 6)]
+
+
+def test_forecast_endpoint_with_range_replays_past_days(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLLECT", "0")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setattr(app, "_forecast_cache", (0.0, []))
+    monkeypatch.setattr(app, "_hindcast_cache", {})
+
+    known_floor = next(iter(app.FLOOR_GROUPS))
+    con = db.connect(tmp_path / "t.db")
+    now = int(time.time()) // 3600 * 3600
+    db.insert_rows(con, [(now - i * 3600, known_floor, 500 + (i % 24) * 10, 2000) for i in range(24 * 7)])
+    con.close()
+
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    with TestClient(app.app) as client:
+        out = client.get(f"/api/forecast?from={yesterday.isoformat()}&to={today.isoformat()}").json()
+
+    past = [r for r in out if r["ts"] <= now]
+    assert past, "지나간 시각의 재현 행이 있어야 한다"
+    # 어제 자정 기점 재현은 어제 01시부터 시작한다
+    assert min(r["ts"] for r in past) == int(datetime.combine(yesterday, datetime.min.time()).timestamp()) + 3600
+    keys = [(r["ts"], r["terminal"], r["kind"]) for r in out]
+    assert len(keys) == len(set(keys)), "시각·그룹당 행은 하나뿐이어야 한다 (재현과 현재 예측이 겹치지 않는다)"
+
+
 def test_forecast_endpoint_returns_future_rows(tmp_path, monkeypatch):
     monkeypatch.setenv("COLLECT", "0")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))

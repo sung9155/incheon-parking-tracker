@@ -1240,6 +1240,10 @@ function applyFocus() {
   if (!seriesChart) return;
   const target = hoverFloor ?? focusedFloor;
   for (const d of seriesChart.data.datasets) {
+    if (d.$kind) {                       // 유형별 예측선: 고른 구역이 속한 유형 것만 남긴다
+      d.hidden = !!target && kindOfFloor.get(target) !== d.$kind;
+      continue;
+    }
     // 흐리게 두면 툴팁에 19줄이 그대로 뜬다. 아예 감춰야 고른 것만 남는다.
     // 기준선은 비교 대상이라 항상 남긴다.
     d.hidden = !!target && !d.$context && d.$floor !== target;
@@ -1436,6 +1440,7 @@ async function loadCongestion() {
 // 오늘 언제가 붐비나. 전부 이미 받아둔 데이터라 요청이 늘지 않는다.
 let paxTodayCache = { at: 0, rows: [] };
 let lastForecast = [];             // loadSeries가 채운다 — /api/forecast 응답 그대로
+const kindOfFloor = new Map();     // 구역 -> 유형. 구역을 고르면 그 유형의 예측선만 남기는 데 쓴다
 
 async function updateSummary() {
   const el = document.getElementById('summary');
@@ -1462,6 +1467,7 @@ async function updateSummary() {
     const usedPct = (cap - free) / cap * 100;
     const soon = lastForecast
       .filter(r => r.terminal === terminal && r.kind === '단기'
+        && r.ts > Date.now() / 1000            // 지나간 시각의 재현 행은 경보가 아니다
         && r.ts <= Date.now() / 1000 + 12 * 3600
         && (r.capacity - r.available) / r.capacity * 100 >= 90)
       .sort((a, b) => a.ts - b.ts)[0];
@@ -1629,7 +1635,7 @@ async function loadSeries() {
     getPattern(),
     fetch(`/api/passengers?${q}`).then(r => r.json()),
     fetch(`/api/congestion/series?${q}&bucket=${usedBucket}`).then(r => r.json()),
-    fetch('/api/forecast').then(r => r.json()),
+    fetch(`/api/forecast?${q}`).then(r => r.json()),
     fetch(`/api/spaces/series?${q}`).then(r => r.json()),
   ]);
   if (mine !== seriesToken) return;      // 그 사이 더 새로운 요청이 출발했다
@@ -1638,6 +1644,7 @@ async function loadSeries() {
   renderHolidayJump(runs);
 
   const rows = all.filter(passesFilter);
+  for (const r of rows) kindOfFloor.set(r.floor, r.kind);
   document.getElementById('empty-note').classList.toggle('hidden', rows.length > 0);
 
   // 구역(floor) 단위로 그린다 — P1/P2 주차장처럼 같은 그룹 안의 서로 다른 주차장이
@@ -1739,35 +1746,37 @@ async function loadSeries() {
     });
   }
 
-  // 예측선: 현재 점유에서 출발해, 평소 증감에 여객 예고 편차를 보정해 적분한 값
-  // (서버 forecast.py). '평소'와 달리 오늘이 평소와 다르다는 사실을 안다 — 지금
-  // 가득 차 있으면 높은 곳에서 시작하고, 연휴 예고가 크면 그만큼 더 채운다.
-  const predByTs = new Map();
-  for (const r of fc.filter(passesFilter)) {
-    const cur = predByTs.get(r.ts) ?? [0, 0];
-    cur[0] += r.available;
-    cur[1] += r.capacity;
-    predByTs.set(r.ts, cur);
-  }
-  const nowSec = Date.now() / 1000;
-  const predPct = stamps.map(ts => {
-    const p = ts > nowSec && predByTs.get(ts);
-    return p && p[1] ? (p[1] - p[0]) / p[1] * 100 : null;
-  });
-  if (predPct.some(v => v !== null)) {
+  // 예측선: 유형(단기·장기·예약)마다 한 줄. 모델이 (터미널, 유형) 그룹 단위라 층 하나까지는
+  // 못 내려간다 — 각 선은 그 유형의 모든 구역을 합친 사용률이다 (서버 forecast.py).
+  // 지나간 시각은 그날 자정 기점 24시간 재현, "지금" 뒤는 현재 예측이라 지금 선에서 한 번
+  // 꺾인다. 색은 셋 다 보라색 — 구역 색은 층이, 점선 패턴은 기준선이 쓰고 있어 남은
+  // 채널이 진하기뿐이다.
+  const PRED_ALPHA = { '단기': '', '장기': 'b3', '예약': '73' };   // 100% · 70% · 45%
+  for (const kind of KINDS.filter(k => filters.kind.has(k))) {
+    const predByTs = new Map();
+    for (const r of fc) {
+      if (r.terminal === terminal && r.kind === kind) predByTs.set(r.ts, [r.available, r.capacity]);
+    }
+    const predPct = stamps.map(ts => {
+      const p = predByTs.get(ts);
+      return p && p[1] ? (p[1] - p[0]) / p[1] * 100 : null;
+    });
+    if (!predPct.some(v => v !== null)) continue;
+    const color = cssVar('--pred') + PRED_ALPHA[kind];
     datasets.unshift({
       $floor: null,
-      $color: cssVar('--pred'),
+      $kind: kind,
+      $color: color,
       $context: true,
-      label: tr('예측'),
+      label: `${tr('예측')} · ${tr(kind)}`,
       data: predPct,
-      $free: stamps.map(ts => (ts > nowSec && predByTs.get(ts)?.[0]) || null),
+      $free: stamps.map(ts => predByTs.get(ts)?.[0] ?? null),
       spanGaps: true,             // 예측은 시간 단위 — 5분 축에서는 점 사이를 잇는다
       pointRadius: 0,
       pointHoverRadius: 3,
       borderWidth: 1.5,
-      borderColor: cssVar('--pred'),
-      backgroundColor: cssVar('--pred'),
+      borderColor: color,
+      backgroundColor: color,
       borderDash: [2, 3],
       tension: 0,
       pointStyle: 'line',
