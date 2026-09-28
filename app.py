@@ -1137,8 +1137,7 @@ def api_forecast():
 
     out = []
     for (term, kind), hist in parked.items():
-        model = forecast.fit(hist, pdep.get(term, {}), parr.get(term, {}),
-                             off, forecast.LAGS.get(term, 3))
+        model = forecast.fit(hist, pdep.get(term, {}), parr.get(term, {}), off)
         if model is None:
             continue
         last_ts = max(hist)

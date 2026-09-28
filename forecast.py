@@ -2,27 +2,29 @@
 """여객 예고 기반 주차 점유 예측.
 
 모델: 시간당 주차대수 증감을 두 부분으로 나눈다.
-  증감(t) ≈ 평소증감[요일유형×시간] + a·출국예고편차(t+lag) + b·입국예고편차(t)
+  증감(t) ≈ 평소증감[요일유형×시간] + k·(그날 순유출 − 평소 순유출)/24
+  순유출 = 그날 출국예고 합 − 입국예고 합
 
-앞부분이 "평소 이맘때 차가 이만큼 들고난다"는 계절성이고, 뒷부분이 여객 예고가
-평소와 다를 때(연휴 첫날 등)의 보정이다. 예고 편차 항 덕분에 이 모델은 요일×시간
-평균만 쓰는 기존 '평소' 기준선이 못 보는 것 — 오늘이 평소와 다른 날이라는 사실 —
-을 본다. 현재 점유에서 출발해 증감을 앞으로 적분하므로, 지금 평소보다 가득 차
-있으면 예측도 그만큼 높은 곳에서 시작한다.
+앞부분이 "평소 이맘때 차가 이만큼 들고난다"는 계절성이고, 뒷부분이 오늘이 평소와
+다른 날일 때의 보정이다. 주차대수는 흐름이 아니라 재고다 — 차는 주인이 출국할 때
+들어오고 그 주인이 입국할 때 나간다. 그래서 여객 총량이 아니라 출국과 입국의 차이가
+재고를 움직인다. 추석 직전 2026-09-22~24 사흘간 여객 총량은 평시와 비슷했지만 순유출이
+8.2만 명이었고, 그 사흘에 전체 주차대수가 7,560대 늘었다(평시 같은 요일 구간 +3,600대).
+
+순유출은 하루 단위로 합쳐야 보인다. 시간별 (출국−입국) 편차는 마중 차량이 들락거리는
+잡음에 묻혀 계수가 죽거나 부호가 뒤집힌다 (2026-09-28 백테스트). 출국 예고와 유입의
+시차(T1 3h, T2 2h)도 확인됐지만 같은 이유로 예측에는 쓰지 않는다.
+
+현재 점유에서 출발해 증감을 앞으로 적분하므로, 지금 평소보다 가득 차 있으면 예측도
+그만큼 높은 곳에서 시작한다.
 
 요일유형은 요일 7개가 아니라 평일/휴일 2개다 — 데이터가 3주일 때 요일×시간
 168칸은 칸마다 표본이 2~3개뿐이라 잡음을 학습한다. 휴일 = 주말 + 공휴일.
-
-상관 분석(2026-08-24~09-12, n=444시간)으로 확정한 시차: 출국 예고 대비 단기주차
-유입 피크가 T1은 3시간 전, T2는 2시간 전 (r≈0.78~0.79, 1주차와 3주차 값이 동일).
 """
 from collections import defaultdict
 from datetime import datetime
 
 HOUR = 3600
-
-# 출국예고가 주차 유입에 앞서는 시간. 상관 분석의 최적 lag (모듈 docstring 참고).
-LAGS = {"T1": 3, "T2": 2}
 
 
 def cell_of(ts: int, off_dates: set) -> tuple:
@@ -31,28 +33,44 @@ def cell_of(ts: int, off_dates: set) -> tuple:
     return (d.weekday() >= 5 or d.date().isoformat() in off_dates, d.hour)
 
 
+def _day_start(ts: int) -> int:
+    return int(datetime.fromtimestamp(ts).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
+def day_nets(pdep, parr) -> dict:
+    """{그날 0시 ts: 출국 합 − 입국 합}. 24시간이 다 있는 날만 — 반나절 합은 순유출이 아니다."""
+    out = {}
+    for day in {_day_start(ts) for ts in pdep}:
+        hours = [day + h * HOUR for h in range(24)]
+        if all(h in pdep and h in parr for h in hours):
+            out[day] = sum(pdep[h] - parr[h] for h in hours)
+    return out
+
+
+def _anomaly(ts, nets, mean_net, off_dates):
+    """그 시간이 속한 날의 순유출 이상치(명/시간). 그날 예고가 없으면 None."""
+    day = _day_start(ts)
+    typ = cell_of(day, off_dates)[0]
+    if day not in nets or typ not in mean_net:
+        return None
+    return (nets[day] - mean_net[typ]) / 24
+
+
 class Model:
     """한 (터미널, 종류) 그룹의 증감 모델."""
 
-    def __init__(self, mean_delta, mean_pdep, mean_parr, a, b, lag):
+    def __init__(self, mean_delta, mean_net, k):
         self.mean_delta = mean_delta   # cell -> 평균 증감(대/시간)
-        self.mean_pdep = mean_pdep     # cell -> 평균 출국예고(명)
-        self.mean_parr = mean_parr     # cell -> 평균 입국예고(명)
-        self.a, self.b, self.lag = a, b, lag
+        self.mean_net = mean_net       # 휴일 여부 -> 평균 일 순유출(명)
+        self.k = k                     # 대/(명/시간)
 
-    def delta(self, ts, pdep, parr, off_dates):
-        """예측 증감. pdep/parr는 {ts: 명} — 미래는 예고 테이블에서 온다."""
+    def delta(self, ts, nets, off_dates):
+        """예측 증감. nets는 day_nets()의 결과 — 미래는 예고 테이블에서 온다."""
         cell = cell_of(ts, off_dates)
         if cell not in self.mean_delta:
             return None
-        out = self.mean_delta[cell]
-        dep_ts = ts + self.lag * HOUR
-        dep_cell = cell_of(dep_ts, off_dates)
-        if dep_ts in pdep and dep_cell in self.mean_pdep:
-            out += self.a * (pdep[dep_ts] - self.mean_pdep[dep_cell])
-        if ts in parr and cell in self.mean_parr:
-            out += self.b * (parr[ts] - self.mean_parr[cell])
-        return out
+        x = _anomaly(ts, nets, self.mean_net, off_dates)
+        return self.mean_delta[cell] + (self.k * x if x is not None else 0.0)
 
 
 def _cell_means(values, off_dates):
@@ -64,8 +82,8 @@ def _cell_means(values, off_dates):
     return {c: s / n for c, (s, n) in sums.items()}
 
 
-def fit(parked, pdep, parr, off_dates, lag) -> Model | None:
-    """parked: {ts(시간 정각): 주차대수}. 증감을 만들고 계절성과 예고 계수를 학습한다."""
+def fit(parked, pdep, parr, off_dates) -> Model | None:
+    """parked: {ts(시간 정각): 주차대수}. 증감을 만들고 계절성과 순유출 계수를 학습한다."""
     deltas = {}
     for ts in parked:
         if ts - HOUR in parked:
@@ -74,58 +92,46 @@ def fit(parked, pdep, parr, off_dates, lag) -> Model | None:
         return None
 
     mean_delta = _cell_means(deltas, off_dates)
-    mean_pdep = _cell_means(pdep, off_dates)
-    mean_parr = _cell_means(parr, off_dates)
+    nets = day_nets(pdep, parr)
+    last = max(parked)                        # 평소 순유출은 실측이 있는 날까지로 — 내일 예고는 학습이 아니다
+    mean_net = _cell_means({d: n for d, n in nets.items() if d <= last}, off_dates)
+    mean_net = {typ: v for (typ, _), v in mean_net.items()}   # 0시 셀 → 휴일 여부만
 
-    # 잔차 = 증감 − 계절성. 이를 예고 편차 2개로 최소제곱 회귀 (절편 없음 — 평균을
-    # 이미 뺐다). 2×2 정규방정식을 직접 푼다. numpy를 들일 크기가 아니다.
+    # 잔차 = 증감 − 계절성. 이를 순유출 이상치 하나로 최소제곱 회귀 (절편 없음 — 평균을
+    # 이미 뺐다). numpy를 들일 크기가 아니다.
     rows = []
     for ts, d in deltas.items():
-        cell = cell_of(ts, off_dates)
-        dep_ts = ts + lag * HOUR
-        dep_cell = cell_of(dep_ts, off_dates)
-        if dep_ts not in pdep or ts not in parr:
-            continue
-        x1 = pdep[dep_ts] - mean_pdep.get(dep_cell, pdep[dep_ts])
-        x2 = parr[ts] - mean_parr.get(cell, parr[ts])
-        rows.append((x1, x2, d - mean_delta[cell]))
+        x = _anomaly(ts, nets, mean_net, off_dates)
+        if x is not None:
+            rows.append((x, d - mean_delta[cell_of(ts, off_dates)]))
 
-    a = b = 0.0
+    k = 0.0
     if len(rows) >= 48:
-        s11 = sum(x1 * x1 for x1, _, _ in rows)
-        s22 = sum(x2 * x2 for _, x2, _ in rows)
-        s12 = sum(x1 * x2 for x1, x2, _ in rows)
-        s1y = sum(x1 * y for x1, _, y in rows)
-        s2y = sum(x2 * y for _, x2, y in rows)
-        det = s11 * s22 - s12 * s12
-        if det > 1e-9:
-            a = (s1y * s22 - s2y * s12) / det
-            b = (s2y * s11 - s1y * s12) / det
+        sxx = sum(x * x for x, _ in rows)
+        if sxx > 1e-9:
+            k = sum(x * y for x, y in rows) / sxx
             # 유의하지 않은 계수는 0 — 조용한 기간에 학습된 잡음 계수가 첫 연휴에
-            # 큰 예고 편차와 곱해져 엉뚱한 방향으로 보정하는 것이 최악의 실패다.
-            n = len(rows)
-            sse = sum((y - a * x1 - b * x2) ** 2 for x1, x2, y in rows)
-            sigma2 = sse / (n - 2)
-            if abs(a) < 2 * (sigma2 * s22 / det) ** 0.5:
-                a = 0.0
-            if abs(b) < 2 * (sigma2 * s11 / det) ** 0.5:
-                b = 0.0
+            # 큰 편차와 곱해져 엉뚱한 방향으로 보정하는 것이 최악의 실패다.
+            sse = sum((y - k * x) ** 2 for x, y in rows)
+            if abs(k) < 2 * (sse / (len(rows) - 1) / sxx) ** 0.5:
+                k = 0.0
 
-    return Model(mean_delta, mean_pdep, mean_parr, a, b, lag)
+    return Model(mean_delta, mean_net, k)
 
 
 def forecast(model: Model, start_ts: int, start_parked: float, capacity: float,
              hours: int, pdep, parr, off_dates) -> dict:
     """start 이후 시간별 예상 주차대수. {ts: 대수}.
 
-    적분이라 오차가 누적된다 — 지평선은 호출자가 여객 예고가 닿는 데까지로 자른다.
-    상한은 capacity의 105%: 실측에서 T1 장기가 100.2%를 찍었다. 만차는 벽이 아니다.
+    적분이라 오차가 누적된다 — 지평선은 호출자가 자른다.
+    상한은 capacity의 105%: 추석에 T1 장기가 105.4%를 찍었다. 만차는 벽이 아니다.
     """
+    nets = day_nets(pdep, parr)
     out = {}
     parked = start_parked
     for i in range(1, hours + 1):
         ts = start_ts + i * HOUR
-        d = model.delta(ts, pdep, parr, off_dates)
+        d = model.delta(ts, nets, off_dates)
         if d is None:
             break
         parked = min(max(parked + d, 0.0), capacity * 1.05)

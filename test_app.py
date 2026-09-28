@@ -1,4 +1,5 @@
 import pathlib
+import random
 import time
 from datetime import date, datetime, timedelta
 
@@ -1491,7 +1492,7 @@ def _hourly(_unused, days, profile):
 def test_forecast_continues_the_daily_pattern():
     profile = [100 + 5 * h for h in range(24)]        # 매시 +5, 자정에 리셋
     hist = _hourly(None, 14, profile)
-    model = fc.fit(hist, {}, {}, set(), lag=3)
+    model = fc.fit(hist, {}, {}, set())
     assert model is not None
 
     start = max(hist)                                  # 8/14 23시
@@ -1501,10 +1502,10 @@ def test_forecast_continues_the_daily_pattern():
 
 
 def test_forecast_clamps_at_105_percent_of_capacity():
-    # 증감이 늘 +10이어도 정원의 105%에서 멈춘다 — 실측에서 T1 장기가 100.2%를 찍었다.
+    # 증감이 늘 +10이어도 정원의 105%에서 멈춘다 — 추석에 T1 장기가 105.4%를 찍었다.
     profile = [10 * h for h in range(24)]
     hist = _hourly(None, 14, profile)
-    model = fc.fit(hist, {}, {}, set(), lag=3)
+    model = fc.fit(hist, {}, {}, set())
     start = int(datetime(2026, 8, 14, 10).timestamp())  # 오르막 중간에서 출발
     pred = fc.forecast(model, start, hist[start], 120, 8, {}, {}, set())
     assert max(pred.values()) <= 120 * 1.05
@@ -1513,28 +1514,53 @@ def test_forecast_clamps_at_105_percent_of_capacity():
 
 def test_fit_needs_at_least_two_days():
     profile = [100] * 24
-    assert fc.fit(_hourly(None, 1, profile), {}, {}, set(), lag=3) is None
+    assert fc.fit(_hourly(None, 1, profile), {}, {}, set()) is None
 
 
-def test_fit_keeps_a_real_pax_coefficient_and_drops_noise():
-    # 증감이 출국예고 편차의 정확히 0.5배인 세계 — 계수 a는 살아남아야 하고,
-    # 증감과 무관한 입국예고의 계수 b는 유의성 가드에 걸려 0이어야 한다.
+def _pax_world(days, net_sign, step):
+    """날마다 순유출 부호가 정해진 합성 세계. net_sign(d) -> ±1 (하루 순유출 ±2,400명),
+    step(d, h) -> 그 시간의 주차 증감."""
     hist, pdep, parr = {}, {}, {}
     parked = 1000.0
-    for d in range(14):
+    for d in range(days):
         for h in range(24):
             ts = int(datetime(2026, 8, 1 + d, h).timestamp())
-            # 같은 시각이라도 날마다 달라야 셀 평균에 흡수되지 않는다 (d*24+h는 24가
-            # 짝수라 시간에만 의존 → 편차가 전부 0이 되는 함정)
-            dep_anom = 100 if (d + h) % 2 else -100
-            noise_arr = 50 if (d + 2 * h) % 3 else -50        # 증감과 무관한 다른 주기
-            pdep[ts + 3 * 3600] = 5000 + dep_anom
-            parr[ts] = 3000 + noise_arr
-            parked += 0.5 * dep_anom
+            pdep[ts] = 3000 + 100 * net_sign(d)
+            parr[ts] = 3000
+            parked += step(d, h)
             hist[ts] = parked
-    model = fc.fit(hist, pdep, parr, set(), lag=3)
-    assert abs(model.a - 0.5) < 0.05
-    assert model.b == 0.0
+    return hist, pdep, parr
+
+
+def test_fit_recovers_the_net_outflow_coefficient():
+    # 증감이 그날 순유출 이상치(÷24)의 정확히 0.5배인 세계 — k는 0.5로 돌아와야 한다.
+    sign = lambda d: 1 if d % 2 else -1
+    hist, pdep, parr = _pax_world(14, sign, lambda d, h: 0.5 * 100 * sign(d))
+    model = fc.fit(hist, pdep, parr, set())
+    assert abs(model.k - 0.5) < 0.05
+
+
+def test_fit_drops_a_noise_coefficient():
+    # 증감이 순유출과 무관한 세계 — 잡음 계수는 유의성 가드에 걸려 0이어야 한다.
+    rnd = random.Random(0)
+    hist, pdep, parr = _pax_world(14, lambda d: 1 if d % 2 else -1,
+                                  lambda d, h: rnd.uniform(-50, 50))
+    assert fc.fit(hist, pdep, parr, set()).k == 0.0
+
+
+def test_incomplete_day_gets_no_pax_correction():
+    # 예고가 한 시간이라도 빠진 날은 반나절 합을 순유출로 착각하지 않고 계절성만 쓴다.
+    sign = lambda d: 1 if d % 2 else -1
+    hist, pdep, parr = _pax_world(14, sign, lambda d, h: 0.5 * 100 * sign(d))
+    model = fc.fit(hist, pdep, parr, set())
+    start = max(hist)                                  # 8/14 23시 → 내일 = 8/15
+    tomorrow = [start + i * 3600 for i in range(1, 25)]
+    del tomorrow[12]
+    with_pax = fc.forecast(model, start, hist[start], 1e9, 24,
+                           {**pdep, **{t: 3100 for t in tomorrow}},
+                           {**parr, **{t: 3000 for t in tomorrow}}, set())
+    plain = fc.forecast(model, start, hist[start], 1e9, 24, {}, {}, set())
+    assert with_pax == plain
 
 
 def test_forecast_endpoint_returns_future_rows(tmp_path, monkeypatch):
