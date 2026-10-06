@@ -1611,7 +1611,11 @@ def test_in_progress_first_run_falls_back_to_plain_cells():
             parked += 20 if d == 14 else 5
             hist[int(datetime(2026, 8, 1 + d, h).timestamp())] = parked
     start = max(hist)
-    with_runs = fc.forecast(fc.fit(hist, {}, {}, cal), start, hist[start], 1e9, 24, {}, {}, cal)
+    model = fc.fit(hist, {}, {}, cal)
+    # 3일 연휴에서는 진행 중인 셀(전날·첫날 오전)과 예측 셀(첫날 오후·중간)이 겹치지 않아
+    # 아래 비교만으로는 필터가 깨져도 통과한다 — 템플릿이 비어 있다는 것을 직접 본다.
+    assert model.tmpl_delta == {}
+    with_runs = fc.forecast(model, start, hist[start], 1e9, 24, {}, {}, cal)
     without = fc.forecast(fc.fit(hist, {}, {}, plain), start, hist[start], 1e9, 24, {}, {}, plain)
     assert with_runs == without
 
