@@ -1085,19 +1085,30 @@ FORECAST_CACHE_SECONDS = 600
 _forecast_cache: tuple[float, list] = (0.0, [])
 
 
-def _off_dates(first: date, last: date) -> set[str]:
-    """구간 안의 공휴일 날짜(ISO). 주말은 forecast.cell_of가 스스로 안다."""
+def _calendar(first: date, last: date) -> forecast.Calendar:
+    """구간의 공휴일과 황금연휴. 주말은 forecast.cell_of가 스스로 안다.
+
+    연휴는 golden_holidays()로 직접 가져온다 — /api/holidays는 데이터 범위로 잘라내므로
+    예고가 닿는 미래의 연휴(전날 예측에 필요)가 빠진다.
+    """
     calendar = holidays.country_holidays(
         "KR", years=list(range(first.year, last.year + 1)), language="ko"
     )
-    out = set()
+    off = set()
     day = first
     while day <= last:
         name = calendar.get(day)
         if name is not None and _base_name(name) not in NOT_A_DAY_OFF:
-            out.add(day.isoformat())
+            off.add(day.isoformat())
         day += timedelta(days=1)
-    return out
+    runs = [(parse_date(r["start"]), parse_date(r["end"]))
+            for r in golden_holidays(first.isoformat(), last.isoformat())]
+    return forecast.Calendar(off, runs)
+
+
+def _cal_for(kind: str, cal: forecast.Calendar) -> forecast.Calendar:
+    """예약 주차장은 연휴 템플릿을 쓰면 나빠진다(2026-10-06 백테스트) — 연휴 없는 달력을 준다."""
+    return cal if kind != "예약" else forecast.Calendar(cal.off)
 
 
 def _forecast_inputs(con, since: int, now: int):
@@ -1121,7 +1132,7 @@ def _forecast_inputs(con, since: int, now: int):
         side.setdefault(r["terminal"], {})
         side[r["terminal"]][ts] = side[r["terminal"]].get(ts, 0.0) + r["expected"]
 
-    return parked, caps, pdep, parr, forecast.Calendar(_off_dates(first_day, last_day))
+    return parked, caps, pdep, parr, _calendar(first_day, last_day)
 
 
 def _forecast_rows(term: str, kind: str, cap: float, pred: dict) -> list[dict]:
@@ -1131,19 +1142,19 @@ def _forecast_rows(term: str, kind: str, cap: float, pred: dict) -> list[dict]:
             for ts, v in sorted(pred.items())]
 
 
-def hindcast_day(hist, origin: int, cap: float, pdep, parr, off) -> dict:
+def hindcast_day(hist, origin: int, cap: float, pdep, parr, cal) -> dict:
     """origin(어느 날 0시)에 알던 것만으로 낸 24시간 예측 — 지나간 날의 예측선을 재현한다.
 
     학습 창은 현재 예측과 같은 60일이되 origin에서 끝난다. 그날 실측을 훔쳐보면
-    재현이 아니라 사후 설명이 된다.
+    재현이 아니라 사후 설명이 된다. 연휴 템플릿도 origin 전에 끝난 연휴만 쓴다.
     """
     train = {t: v for t, v in hist.items() if origin - FORECAST_TRAIN_DAYS * 86400 <= t <= origin}
     if origin not in train:
         return {}
-    model = forecast.fit(train, pdep, parr, off)
+    model = forecast.fit(train, pdep, parr, cal)
     if model is None:
         return {}
-    return forecast.forecast(model, origin, train[origin], cap, FORECAST_MAX_HOURS, pdep, parr, off)
+    return forecast.forecast(model, origin, train[origin], cap, FORECAST_MAX_HOURS, pdep, parr, cal)
 
 
 def _live_forecast(con, now: int) -> list[dict]:
@@ -1153,10 +1164,11 @@ def _live_forecast(con, now: int) -> list[dict]:
     if time.time() - _forecast_cache[0] < FORECAST_CACHE_SECONDS:
         return _forecast_cache[1]
 
-    parked, caps, pdep, parr, off = _forecast_inputs(con, now - FORECAST_TRAIN_DAYS * 86400, now)
+    parked, caps, pdep, parr, cal = _forecast_inputs(con, now - FORECAST_TRAIN_DAYS * 86400, now)
     out = []
     for (term, kind), hist in parked.items():
-        model = forecast.fit(hist, pdep.get(term, {}), parr.get(term, {}), off)
+        kcal = _cal_for(kind, cal)
+        model = forecast.fit(hist, pdep.get(term, {}), parr.get(term, {}), kcal)
         if model is None:
             continue
         last_ts = max(hist)
@@ -1166,7 +1178,7 @@ def _live_forecast(con, now: int) -> list[dict]:
             continue
         hours = min((max(future_pax) - last_ts) // forecast.HOUR, FORECAST_MAX_HOURS)
         pred = forecast.forecast(model, last_ts, hist[last_ts], cap, hours,
-                                 pdep[term], parr.get(term, {}), off)
+                                 pdep[term], parr.get(term, {}), kcal)
         out.extend(_forecast_rows(term, kind, cap, pred))
 
     _forecast_cache = (time.time(), out)
@@ -1186,7 +1198,7 @@ def _hindcast(con, first: date, last: date, now: int, live: list[dict]) -> list[
     if first > last:
         return []
     since = int(datetime.combine(first, clock.min).timestamp()) - FORECAST_TRAIN_DAYS * 86400
-    parked, caps, pdep, parr, off = _forecast_inputs(con, since, now)
+    parked, caps, pdep, parr, cal = _forecast_inputs(con, since, now)
 
     live_start: dict[tuple, int] = {}
     for r in live:
@@ -1203,7 +1215,7 @@ def _hindcast(con, first: date, last: date, now: int, live: list[dict]) -> list[
             if rows is None:
                 origin = int(datetime.combine(day, clock.min).timestamp())
                 cap = caps[(term, kind)].get(origin)
-                pred = hindcast_day(hist, origin, cap, pdep.get(term, {}), parr.get(term, {}), off) if cap else {}
+                pred = hindcast_day(hist, origin, cap, pdep.get(term, {}), parr.get(term, {}), _cal_for(kind, cal)) if cap else {}
                 rows = _forecast_rows(term, kind, cap, pred) if pred else []
                 if day < today:
                     _hindcast_cache[key] = rows

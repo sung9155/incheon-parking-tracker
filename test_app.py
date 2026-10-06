@@ -1616,6 +1616,13 @@ def test_in_progress_first_run_falls_back_to_plain_cells():
     assert with_runs == without
 
 
+def test_reserved_lots_get_a_calendar_without_holiday_runs():
+    cal = fc.Calendar(off={"2026-10-05"}, runs=[(date(2026, 10, 3), date(2026, 10, 5))])
+    assert app._cal_for("단기", cal) is cal
+    plain = app._cal_for("예약", cal)
+    assert plain.pos == {} and plain.off == cal.off
+
+
 def test_hindcast_uses_only_data_known_at_its_origin():
     # 14일은 매시 +5, 15일째는 매시 -5인 세계. 15일 자정 기점 재현은 그때까지의
     # 데이터만 봐야 하므로 자정 실측(400)에서 출발해 +5씩 올라가야 한다.
