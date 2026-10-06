@@ -61,6 +61,13 @@ def cell_of(ts: int, cal: Calendar) -> tuple:
     return (d.weekday() >= 5 or d.date().isoformat() in cal.off, d.hour)
 
 
+def template_cell(ts: int, cal: Calendar) -> tuple | None:
+    """(연휴 위치, 시각). 연휴에 속한 날(전날·다음날 포함)이 아니면 None."""
+    d = datetime.fromtimestamp(ts)
+    pos = cal.pos.get(d.date().isoformat())
+    return None if pos is None else (pos, d.hour)
+
+
 def _day_start(ts: int) -> int:
     return int(datetime.fromtimestamp(ts).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
@@ -87,13 +94,21 @@ def _anomaly(ts, nets, mean_net, cal):
 class Model:
     """한 (터미널, 종류) 그룹의 증감 모델."""
 
-    def __init__(self, mean_delta, mean_net, k):
-        self.mean_delta = mean_delta   # cell -> 평균 증감(대/시간)
+    def __init__(self, mean_delta, tmpl_delta, mean_net, k):
+        self.mean_delta = mean_delta   # (휴일 여부, 시각) -> 평균 증감(대/시간)
+        self.tmpl_delta = tmpl_delta   # (연휴 위치, 시각) -> 평균 증감 — 끝난 연휴에서만 배운 템플릿
         self.mean_net = mean_net       # 휴일 여부 -> 평균 일 순유출(명)
         self.k = k                     # 대/(명/시간)
 
     def seasonal(self, ts, cal):
-        """평소 증감. 셀이 없으면 None."""
+        """평소 증감: 템플릿 셀이 있으면 그것, 없으면 기본 셀, 그것도 없으면 None.
+
+        첫 연휴에는 템플릿이 없어 현행과 똑같이 움직이고, 두 번째 연휴부터 앞 연휴의
+        모양(전날 쌓이고, 첫날 치솟고, 마지막 날 빠지는)을 쓴다.
+        """
+        t = template_cell(ts, cal)
+        if t is not None and t in self.tmpl_delta:
+            return self.tmpl_delta[t]
         return self.mean_delta.get(cell_of(ts, cal))
 
     def delta(self, ts, nets, cal):
@@ -124,11 +139,16 @@ def fit(parked, pdep, parr, cal: Calendar) -> Model | None:
         return None
 
     mean_delta = _cell_means(deltas, cal)
+    # 템플릿: 끝난 연휴의 증감만. 진행 중인 연휴를 넣으면 첫날 급증이 뒷날에 그대로
+    # 복사돼 마지막 날을 과대 예측한다 (2026-10-06 백테스트, 추석 +7.6%p).
+    today = _day_start(max(parked))
+    finished = {ts: d for ts, d in deltas.items() if cal.run_end.get(_iso(ts), today + 1) <= today}
+    tmpl_delta = _cell_means(finished, cal, template_cell)
     nets = day_nets(pdep, parr)
     last = max(parked)                        # 평소 순유출은 실측이 있는 날까지로 — 내일 예고는 학습이 아니다
     mean_net = _cell_means({d: n for d, n in nets.items() if d <= last}, cal)
     mean_net = {typ: v for (typ, _), v in mean_net.items()}   # 0시 셀 → 휴일 여부만
-    model = Model(mean_delta, mean_net, 0.0)
+    model = Model(mean_delta, tmpl_delta, mean_net, 0.0)
 
     # 잔차 = 증감 − 계절성. 이를 순유출 이상치 하나로 최소제곱 회귀 (절편 없음 — 평균을
     # 이미 뺐다). numpy를 들일 크기가 아니다.

@@ -1576,6 +1576,46 @@ def test_calendar_marks_holiday_run_positions():
     assert fc.Calendar().pos == {} and fc.Calendar().off == set()
 
 
+def _world_with_holiday_runs():
+    """8/8(토)~8/10(월, 공휴일) 연휴와 8/15(토)~8/17(월, 공휴일) 연휴.
+    증감은 매시 +5, 첫 연휴 첫날(8/8)만 매시 +20. 데이터는 8/14 23시까지."""
+    cal = fc.Calendar(off={"2026-08-10", "2026-08-17"},
+                      runs=[(date(2026, 8, 8), date(2026, 8, 10)), (date(2026, 8, 15), date(2026, 8, 17))])
+    hist, parked = {}, 1000.0
+    for d in range(14):                                   # 8/1 ~ 8/14
+        for h in range(24):
+            parked += 20 if d == 7 else 5
+            hist[int(datetime(2026, 8, 1 + d, h).timestamp())] = parked
+    return cal, hist
+
+
+def test_finished_holiday_run_becomes_the_template_for_the_next():
+    # 8/14 23시 기점의 다음 6시간은 8/15 0~5시 = 두 번째 연휴의 첫날. 끝난 첫 연휴의
+    # 첫날(8/8) 증감 +20이 템플릿이라 +20씩 올라가야 한다. 휴일 셀 평균(+5와 +20의 섞임)이면 실패.
+    cal, hist = _world_with_holiday_runs()
+    model = fc.fit(hist, {}, {}, cal)
+    start = max(hist)
+    pred = fc.forecast(model, start, hist[start], 1e9, 6, {}, {}, cal)
+    steps = [pred[start + i * 3600] - (pred[start + (i - 1) * 3600] if i > 1 else hist[start]) for i in range(1, 7)]
+    assert [round(s) for s in steps] == [20] * 6
+
+
+def test_in_progress_first_run_falls_back_to_plain_cells():
+    # 끝난 연휴가 없는 첫 연휴 한가운데(8/15 12시) 기점 — 템플릿이 없으니 연휴 없는
+    # 달력으로 적합한 것과 예측이 완전히 같아야 한다 (현행 동작 보존).
+    cal = fc.Calendar(off={"2026-08-17"}, runs=[(date(2026, 8, 15), date(2026, 8, 17))])
+    plain = fc.Calendar(off={"2026-08-17"})
+    hist, parked = {}, 1000.0
+    for d in range(15):
+        for h in range(24 if d < 14 else 13):             # 8/15는 12시까지
+            parked += 20 if d == 14 else 5
+            hist[int(datetime(2026, 8, 1 + d, h).timestamp())] = parked
+    start = max(hist)
+    with_runs = fc.forecast(fc.fit(hist, {}, {}, cal), start, hist[start], 1e9, 24, {}, {}, cal)
+    without = fc.forecast(fc.fit(hist, {}, {}, plain), start, hist[start], 1e9, 24, {}, {}, plain)
+    assert with_runs == without
+
+
 def test_hindcast_uses_only_data_known_at_its_origin():
     # 14일은 매시 +5, 15일째는 매시 -5인 세계. 15일 자정 기점 재현은 그때까지의
     # 데이터만 봐야 하므로 자정 실측(400)에서 출발해 +5씩 올라가야 한다.
