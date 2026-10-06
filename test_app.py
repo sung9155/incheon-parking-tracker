@@ -1492,11 +1492,11 @@ def _hourly(_unused, days, profile):
 def test_forecast_continues_the_daily_pattern():
     profile = [100 + 5 * h for h in range(24)]        # 매시 +5, 자정에 리셋
     hist = _hourly(None, 14, profile)
-    model = fc.fit(hist, {}, {}, set())
+    model = fc.fit(hist, {}, {}, fc.Calendar())
     assert model is not None
 
     start = max(hist)                                  # 8/14 23시
-    pred = fc.forecast(model, start, hist[start], 10_000, 6, {}, {}, set())
+    pred = fc.forecast(model, start, hist[start], 10_000, 6, {}, {}, fc.Calendar())
     got = [round(pred[start + i * 3600]) for i in range(1, 7)]
     assert got == [profile[h] for h in (0, 1, 2, 3, 4, 5)]
 
@@ -1505,16 +1505,16 @@ def test_forecast_clamps_at_105_percent_of_capacity():
     # 증감이 늘 +10이어도 정원의 105%에서 멈춘다 — 추석에 T1 장기가 105.4%를 찍었다.
     profile = [10 * h for h in range(24)]
     hist = _hourly(None, 14, profile)
-    model = fc.fit(hist, {}, {}, set())
+    model = fc.fit(hist, {}, {}, fc.Calendar())
     start = int(datetime(2026, 8, 14, 10).timestamp())  # 오르막 중간에서 출발
-    pred = fc.forecast(model, start, hist[start], 120, 8, {}, {}, set())
+    pred = fc.forecast(model, start, hist[start], 120, 8, {}, {}, fc.Calendar())
     assert max(pred.values()) <= 120 * 1.05
     assert min(pred.values()) >= 0
 
 
 def test_fit_needs_at_least_two_days():
     profile = [100] * 24
-    assert fc.fit(_hourly(None, 1, profile), {}, {}, set()) is None
+    assert fc.fit(_hourly(None, 1, profile), {}, {}, fc.Calendar()) is None
 
 
 def _pax_world(days, net_sign, step):
@@ -1536,7 +1536,7 @@ def test_fit_recovers_the_net_outflow_coefficient():
     # 증감이 그날 순유출 이상치(÷24)의 정확히 0.5배인 세계 — k는 0.5로 돌아와야 한다.
     sign = lambda d: 1 if d % 2 else -1
     hist, pdep, parr = _pax_world(14, sign, lambda d, h: 0.5 * 100 * sign(d))
-    model = fc.fit(hist, pdep, parr, set())
+    model = fc.fit(hist, pdep, parr, fc.Calendar())
     assert abs(model.k - 0.5) < 0.05
 
 
@@ -1545,22 +1545,35 @@ def test_fit_drops_a_noise_coefficient():
     rnd = random.Random(0)
     hist, pdep, parr = _pax_world(14, lambda d: 1 if d % 2 else -1,
                                   lambda d, h: rnd.uniform(-50, 50))
-    assert fc.fit(hist, pdep, parr, set()).k == 0.0
+    assert fc.fit(hist, pdep, parr, fc.Calendar()).k == 0.0
 
 
 def test_incomplete_day_gets_no_pax_correction():
     # 예고가 한 시간이라도 빠진 날은 반나절 합을 순유출로 착각하지 않고 계절성만 쓴다.
     sign = lambda d: 1 if d % 2 else -1
     hist, pdep, parr = _pax_world(14, sign, lambda d, h: 0.5 * 100 * sign(d))
-    model = fc.fit(hist, pdep, parr, set())
+    model = fc.fit(hist, pdep, parr, fc.Calendar())
     start = max(hist)                                  # 8/14 23시 → 내일 = 8/15
     tomorrow = [start + i * 3600 for i in range(1, 25)]
     del tomorrow[12]
     with_pax = fc.forecast(model, start, hist[start], 1e9, 24,
                            {**pdep, **{t: 3100 for t in tomorrow}},
-                           {**parr, **{t: 3000 for t in tomorrow}}, set())
-    plain = fc.forecast(model, start, hist[start], 1e9, 24, {}, {}, set())
+                           {**parr, **{t: 3000 for t in tomorrow}}, fc.Calendar())
+    plain = fc.forecast(model, start, hist[start], 1e9, 24, {}, {}, fc.Calendar())
     assert with_pax == plain
+
+
+def test_calendar_marks_holiday_run_positions():
+    cal = fc.Calendar(off={"2026-10-05"}, runs=[(date(2026, 10, 3), date(2026, 10, 5))])
+    got = [cal.pos[d] for d in ("2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06")]
+    assert got == [fc.Calendar.PRE, fc.Calendar.FIRST, fc.Calendar.MID, fc.Calendar.LAST, fc.Calendar.POST]
+    assert "2026-10-07" not in cal.pos
+    # 끝난 연휴 판정선: 다음날(10/6)이 지나고 하루가 더 시작되는 자정
+    assert cal.run_end["2026-10-04"] == int(datetime(2026, 10, 7).timestamp())
+    assert "2026-10-05" in cal.off
+    one_day = fc.Calendar(runs=[(date(2026, 10, 9), date(2026, 10, 9))])
+    assert one_day.pos["2026-10-09"] == fc.Calendar.FIRST and one_day.pos["2026-10-10"] == fc.Calendar.POST
+    assert fc.Calendar().pos == {} and fc.Calendar().off == set()
 
 
 def test_hindcast_uses_only_data_known_at_its_origin():
@@ -1573,7 +1586,7 @@ def test_hindcast_uses_only_data_known_at_its_origin():
     for h in range(24):
         hist[int(datetime(2026, 8, 15, h).timestamp())] = down[h]
     origin = int(datetime(2026, 8, 15, 0).timestamp())
-    pred = app.hindcast_day(hist, origin, 10_000, {}, {}, set())
+    pred = app.hindcast_day(hist, origin, 10_000, {}, {}, fc.Calendar())
     assert [round(pred[origin + i * 3600]) for i in range(1, 6)] == [400 + 5 * i for i in range(1, 6)]
 
 

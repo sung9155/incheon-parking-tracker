@@ -1121,7 +1121,7 @@ def _forecast_inputs(con, since: int, now: int):
         side.setdefault(r["terminal"], {})
         side[r["terminal"]][ts] = side[r["terminal"]].get(ts, 0.0) + r["expected"]
 
-    return parked, caps, pdep, parr, _off_dates(first_day, last_day)
+    return parked, caps, pdep, parr, forecast.Calendar(_off_dates(first_day, last_day))
 
 
 def _forecast_rows(term: str, kind: str, cap: float, pred: dict) -> list[dict]:
